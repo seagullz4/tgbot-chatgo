@@ -13,7 +13,7 @@ unzip xxxxx.zip
 必须正确填写./env里面的文件内容
 
 示例：
-```
+```bash
 # 基础配置
 APP_NAME=interactive-bot
 BOT_TOKEN=123456789:replace-with-your-token
@@ -24,7 +24,7 @@ ADMIN_GROUP_ID=-1001234567890
 ADMIN_USER_IDS=123456789,987654321
 ```
 之后对软件包进行授予权限，并进行执行二进制文件
-```
+```bash
 chmod +x bot-linux-amd64
 #或者 chmod +x bot-linux-arm64
 ./bot-linux-amd64   (或者./bot-linux-arm64 )
