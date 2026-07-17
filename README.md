@@ -108,3 +108,6 @@ internal/model/     数据模型
 internal/job/       延迟任务
 .env.example        配置示例
 ```
+
+
+鸣谢  [Telegram-interactive-bot](https://github.com/MiHaKun/Telegram-interactive-bot)  本项目部分想法包括结构来源于这个优秀的项目
