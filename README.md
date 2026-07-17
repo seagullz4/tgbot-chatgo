@@ -11,6 +11,7 @@ cd tgbot-chatgo
 unzip xxxxx.zip
 ```
 必须正确填写./env里面的文件内容
+
 示例：
 ```
 # 基础配置
@@ -21,6 +22,12 @@ WELCOME_MESSAGE="你好，我是客服机器人。请直接发送消息联系我
 # 管理群必须是已开启 Topics 的超级群
 ADMIN_GROUP_ID=-1001234567890
 ADMIN_USER_IDS=123456789,987654321
+```
+之后对软件包进行授予权限，并进行执行二进制文件
+```
+chmod +x bot-linux-amd64
+#或者 chmod +x bot-linux-arm64
+./bot-linux-amd64   (或者./bot-linux-arm64 )
 ```
 
 ## 开发环境
