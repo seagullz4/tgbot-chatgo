@@ -40,6 +40,9 @@ chmod +x bot-linux-amd64
 #或者./bot-linux-arm64 
 ```
 
+低内存占用
+<img width="774" height="73" alt="image" src="https://github.com/user-attachments/assets/53dbb89e-ebab-40ae-a25a-9bedda346602" />
+
 ## 开发环境
 
 - 安装 [Go 1.22+](https://go.dev/dl/)
