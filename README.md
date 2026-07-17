@@ -4,11 +4,13 @@
 
 使用教程：
 
+方法一：
 一键安装脚本（适用于Linux）
 ```bash
 bash <(curl -sSL https://raw.githubusercontent.com/seagullz4/tgbot-chatgo/main/install.sh)
 ```
 
+方法二：
 下载最新的[release](https://github.com/seagullz4/tgbot-chatgo/releases)文件并且解压到Linux服务器上面，新建一个文件夹
 ```bash
 mkdir tgbot-chatgo
