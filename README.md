@@ -3,7 +3,7 @@
 一款基于go语言开发的轻量级多功能双向聊天机器人，普通用户私聊机器人后，消息会转发到管理员超级群的独立话题；管理员在话题中回复，消息会再转回用户。
 
 使用教程：
-下载最新的(release)[https://github.com/seagullz4/tgbot-chatgo/releases/tag/v0.0.1]文件并且解压到Linux服务器上面，新建一个文件夹
+下载最新的[release](https://github.com/seagullz4/tgbot-chatgo/releases)文件并且解压到Linux服务器上面，新建一个文件夹
 ```bash
 mkdir tgbot-chatgo
 cd tgbot-chatgo
