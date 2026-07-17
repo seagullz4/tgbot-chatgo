@@ -27,7 +27,8 @@ ADMIN_USER_IDS=123456789,987654321
 ```bash
 chmod +x bot-linux-amd64
 #或者 chmod +x bot-linux-arm64
-./bot-linux-amd64   (或者./bot-linux-arm64 )
+./bot-linux-amd64
+#或者./bot-linux-arm64 
 ```
 
 ## 开发环境
