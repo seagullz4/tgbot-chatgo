@@ -1,6 +1,26 @@
-# Telegram 客服中继机器人（开发说明）
+# Telegram 客服中继机器人(telegram双向聊天机器人)
 
-普通用户私聊机器人后，消息会转发到管理员超级群的独立话题；管理员在话题中回复，消息会再转回用户。
+一款基于go语言开发的轻量级多功能双向聊天机器人，普通用户私聊机器人后，消息会转发到管理员超级群的独立话题；管理员在话题中回复，消息会再转回用户。
+
+使用教程：
+下载最新的release文件并且解压到Linux服务器上面，新建一个文件夹
+```bash
+mkdir tgbot-chatgo
+cd tgbot-chatgo
+unzip xxxxx.zip
+```
+必须正确填写./env里面的文件内容
+示例：
+```
+# 基础配置
+APP_NAME=interactive-bot
+BOT_TOKEN=123456789:replace-with-your-token
+WELCOME_MESSAGE="你好，我是客服机器人。请直接发送消息联系我们。"
+
+# 管理群必须是已开启 Topics 的超级群
+ADMIN_GROUP_ID=-1001234567890
+ADMIN_USER_IDS=123456789,987654321
+```
 
 ## 开发环境
 
