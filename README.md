@@ -7,6 +7,7 @@
 ```bash
 mkdir tgbot-chatgo
 cd tgbot-chatgo
+#下载最新压缩包
 unzip xxxxx.zip
 ```
 必须正确填写./env里面的文件内容
