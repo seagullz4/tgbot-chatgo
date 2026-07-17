@@ -18,6 +18,7 @@ GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}"
 SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 VERSION_FILE="${INSTALL_DIR}/.version"
 TEMP_DIR=""
+INPUT_DEVICE="${INPUT_DEVICE:-/dev/tty}"
 
 COLOR_RED='\033[0;31m'
 COLOR_GREEN='\033[0;32m'
@@ -46,6 +47,10 @@ require_root() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+open_input_stream() {
+  exec 9<"$INPUT_DEVICE"
 }
 
 validate_settings() {
@@ -174,7 +179,7 @@ prompt_text() {
     else
       printf "%s: " "$prompt_message"
     fi
-    IFS= read -r input_value
+    IFS= read -r input_value <&9
     input_value="${input_value:-$default_value}"
     if [[ -n "$input_value" ]]; then
       printf -v "$variable_name" '%s' "$input_value"
@@ -188,7 +193,7 @@ prompt_secret() {
   local variable_name="$1" prompt_message="$2" input_value
   while true; do
     printf "%s: " "$prompt_message"
-    IFS= read -r -s input_value
+    IFS= read -r -s input_value <&9
     printf '\n'
     if [[ -n "$input_value" ]]; then
       printf -v "$variable_name" '%s' "$input_value"
@@ -208,7 +213,7 @@ prompt_yes_no() {
 
   while true; do
     printf "%s [%s]: " "$prompt_message" "$hint"
-    IFS= read -r answer
+    IFS= read -r answer <&9
     case "${answer:-$default_answer}" in
       y|Y|yes|YES|Yes|TRUE|true)
         printf -v "$variable_name" '%s' "TRUE"
@@ -688,7 +693,7 @@ show_menu() {
 
 wait_for_enter() {
   printf '\n按 Enter 返回主菜单...'
-  IFS= read -r _
+  IFS= read -r _ <&9
 }
 
 main() {
@@ -696,6 +701,7 @@ main() {
   require_root
   validate_settings
   command_exists systemctl || fatal "当前系统没有 systemctl；此脚本仅适用于使用 systemd 的 Linux 发行版。"
+  open_input_stream
 
   if (( $# > 0 )); then
     warn "此版本不需要命令参数，将直接进入交互菜单。"
@@ -704,7 +710,7 @@ main() {
   while true; do
     show_menu
     printf '请输入选项 [0-4]: '
-    IFS= read -r menu_choice
+    IFS= read -r menu_choice <&9
     case "$menu_choice" in
       1)
         install_application
