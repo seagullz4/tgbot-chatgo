@@ -66,10 +66,10 @@ HTTP_MAX_IDLE_PER_HOST=16
 ```
 4. 给程序执行权限并启动：
 ```bash
-chmod +x bot-linux-amd64
-# 或者：chmod +x bot-linux-arm64
-./bot-linux-amd64
-# 或者：./bot-linux-arm64
+chmod +x go-bot-linux-amd64
+# 或者：chmod +x go-bot-linux-arm64
+./go-bot-linux-amd64
+# 或者：./go-bot-linux-arm64
 ```
 
 低内存占用
