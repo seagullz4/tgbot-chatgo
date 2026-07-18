@@ -5,7 +5,7 @@
 使用教程：
 
 方法一：
-一键安装脚本（适用于Linux）
+一键安装脚本（适用于Linux,关于如何获取机器人 ID、群组 ID 等信息，请看 [id获取文档](https://github.com/seagullz4/tgbot-chatgo/blob/main/README2.md)）
 ```bash
 bash <(curl -sSL https://raw.githubusercontent.com/seagullz4/tgbot-chatgo/main/install.sh)
 ```
