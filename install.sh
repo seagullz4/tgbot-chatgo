@@ -17,6 +17,10 @@ GITHUB_REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}"
 GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}"
 SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 VERSION_FILE="${INSTALL_DIR}/.version"
+LEGACY_BINARY_PATH="${INSTALL_DIR}/go-bot"
+RELEASE_ARCH=""
+BINARY_ASSET=""
+INSTALLED_BINARY_PATH=""
 TEMP_DIR=""
 INPUT_DEVICE="${INPUT_DEVICE:-/dev/tty}"
 
@@ -55,6 +59,7 @@ open_input_stream() {
 
 validate_settings() {
   [[ "$INSTALL_DIR" == /* ]] || fatal "INSTALL_DIR 必须是绝对路径：${INSTALL_DIR}"
+  [[ "$INSTALL_DIR" != *[[:space:]]* ]] || fatal "INSTALL_DIR 不能包含空格或其他空白字符：${INSTALL_DIR}"
   [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || fatal "SERVICE_NAME 包含不安全字符：${SERVICE_NAME}"
   [[ "$SERVICE_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*[$]?$ ]] || fatal "SERVICE_USER 格式不正确：${SERVICE_USER}"
   [[ "$SERVICE_GROUP" =~ ^[A-Za-z_][A-Za-z0-9_-]*[$]?$ ]] || fatal "SERVICE_GROUP 格式不正确：${SERVICE_GROUP}"
@@ -87,7 +92,7 @@ install_dependencies() {
 }
 
 detect_architecture() {
-  local machine
+  local mode="${1:-verbose}" machine
   machine="$(uname -m)"
   case "$machine" in
     x86_64|amd64)
@@ -100,7 +105,11 @@ detect_architecture() {
       fatal "暂不支持系统架构：${machine}。当前发布仅提供 amd64 和 arm64。"
       ;;
   esac
-  info "检测到系统架构：${machine}，将使用 ${RELEASE_ARCH} 发布包。"
+  BINARY_ASSET="go-bot-linux-${RELEASE_ARCH}"
+  INSTALLED_BINARY_PATH="${INSTALL_DIR}/${BINARY_ASSET}"
+  if [[ "$mode" != "quiet" ]]; then
+    info "检测到系统架构：${machine}，将使用 ${RELEASE_ARCH} 发布包。"
+  fi
 }
 
 resolve_release() {
@@ -148,7 +157,6 @@ resolve_release() {
 download_release() {
   local asset_name archive_file extracted_binary extracted_env_example
   asset_name="go-bot-linux-${RELEASE_ARCH}.zip"
-  BINARY_ASSET="go-bot-linux-${RELEASE_ARCH}"
   archive_file="${TEMP_DIR}/${asset_name}"
 
   info "正在下载 ${RESOLVED_VERSION}：${asset_name}"
@@ -289,22 +297,13 @@ read_template_bool() {
   esac
 }
 
-read_template_integer() {
-  local key="$1" fallback="$2" value
-  value="$(read_template_value "$key" "$fallback")"
-  if [[ "$value" =~ ^[0-9]+$ ]]; then
-    printf '%s' "$value"
-  else
-    printf '%s' "$fallback"
-  fi
-}
 
 collect_configuration() {
   local default_app_name default_disable_verification default_message_interval
   local default_forward_ack default_topic_ban default_clear_messages
   default_app_name="$(read_template_value APP_NAME 'baibai-bot')"
   default_disable_verification="$(read_template_bool DISABLE_VERIFICATION FALSE)"
-  default_message_interval="$(read_template_integer MESSAGE_INTERVAL 0)"
+  default_message_interval="0"
   default_forward_ack="$(read_template_bool USER_FORWARD_ACK TRUE)"
   default_topic_ban="$(read_template_bool DELETE_TOPIC_AS_FOREVER_BAN FALSE)"
   default_clear_messages="$(read_template_bool DELETE_USER_MESSAGE_ON_CLEAR_CMD TRUE)"
@@ -339,6 +338,15 @@ collect_configuration() {
       break
     fi
     warn "管理员 ID 必须是正整数，多人之间使用英文逗号。"
+  done
+
+  while true; do
+    prompt_text OWNER_USER_IDS "请输入唯一超级管理员用户 ID（只能填写一个数字 ID）"
+    OWNER_USER_IDS="${OWNER_USER_IDS//[[:space:]]/}"
+    if [[ "$OWNER_USER_IDS" =~ ^[0-9]+$ ]]; then
+      break
+    fi
+    warn "超级管理员必须且只能填写一个正整数用户 ID。"
   done
 
   prompt_text BOT_APP_NAME "请输入应用名称" "$default_app_name"
@@ -377,11 +385,15 @@ remove_legacy_env_entry() {
 ensure_install_directories() {
   [[ ! -L "$INSTALL_DIR" ]] || fatal "安装目录不能是符号链接：${INSTALL_DIR}"
   [[ ! -L "${INSTALL_DIR}/data" ]] || fatal "数据库目录不能是符号链接：${INSTALL_DIR}/data"
+  [[ ! -L "${INSTALL_DIR}/logs" ]] || fatal "日志目录不能是符号链接：${INSTALL_DIR}/logs"
   create_service_account
-  install -d -m 0755 -o root -g root "$INSTALL_DIR"
+
+  # sticky bit 允许服务原子更新 .env，同时禁止服务替换 root 拥有的二进制和模板。
+  install -d -m 1770 -o root -g "$SERVICE_GROUP" "$INSTALL_DIR"
   remove_legacy_env_entry
   install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "${INSTALL_DIR}/data"
-  chown -R "$SERVICE_USER:$SERVICE_GROUP" "${INSTALL_DIR}/data"
+  install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "${INSTALL_DIR}/logs"
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
 }
 
 replace_env_value() {
@@ -414,30 +426,80 @@ write_environment_file() {
   [[ ! -L "$env_file" ]] || fatal "配置文件不能是符号链接：${env_file}"
 
   install_template_reference
-  install -m 0640 -o root -g "$SERVICE_GROUP" "$DOWNLOADED_ENV_EXAMPLE" "$env_file"
+  install -m 0600 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DOWNLOADED_ENV_EXAMPLE" "$env_file"
   replace_env_value "$env_file" APP_NAME "$(env_value "$BOT_APP_NAME")"
   replace_env_value "$env_file" BOT_TOKEN "$(env_value "$BOT_TOKEN")"
   replace_env_value "$env_file" ADMIN_GROUP_ID "$ADMIN_GROUP_ID"
   replace_env_value "$env_file" ADMIN_USER_IDS "$ADMIN_USER_IDS"
+  replace_env_value "$env_file" OWNER_USER_IDS "$OWNER_USER_IDS"
   replace_env_value "$env_file" DELETE_TOPIC_AS_FOREVER_BAN "$DELETE_TOPIC_AS_FOREVER_BAN"
   replace_env_value "$env_file" DELETE_USER_MESSAGE_ON_CLEAR_CMD "$DELETE_USER_MESSAGE_ON_CLEAR_CMD"
   replace_env_value "$env_file" DISABLE_VERIFICATION "$DISABLE_VERIFICATION"
   replace_env_value "$env_file" MESSAGE_INTERVAL "$MESSAGE_INTERVAL"
   replace_env_value "$env_file" USER_FORWARD_ACK "$USER_FORWARD_ACK"
-  chmod 640 "$env_file"
-  chown root:"$SERVICE_GROUP" "$env_file"
+  chmod 600 "$env_file"
+  chown "$SERVICE_USER:$SERVICE_GROUP" "$env_file"
 }
 
 preserve_environment_permissions() {
   [[ ! -L "${INSTALL_DIR}/.env" ]] || fatal "配置文件不能是符号链接：${INSTALL_DIR}/.env"
   [[ -f "${INSTALL_DIR}/.env" ]] || fatal "缺少配置文件：${INSTALL_DIR}/.env"
-  chmod 640 "${INSTALL_DIR}/.env"
-  chown root:"$SERVICE_GROUP" "${INSTALL_DIR}/.env"
+  chmod 600 "${INSTALL_DIR}/.env"
+  chown "$SERVICE_USER:$SERVICE_GROUP" "${INSTALL_DIR}/.env"
+}
+read_existing_env_value() {
+  local key="$1" line value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "${key}="* ]]; then
+      value="${line#*=}"
+      if (( ${#value} >= 2 )); then
+        if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] \
+          || [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+          value="${value:1:${#value}-2}"
+        fi
+      fi
+      printf '%s' "$value"
+      return
+    fi
+  done <"${INSTALL_DIR}/.env"
+}
+
+collect_update_migrations() {
+  local existing_owner template_owner
+  UPDATE_OWNER_USER_IDS=""
+  existing_owner="$(read_existing_env_value OWNER_USER_IDS)"
+  template_owner="$(read_template_value OWNER_USER_IDS '123456789')"
+  if [[ ! "$existing_owner" =~ ^[0-9]+$ ]] || [[ "$existing_owner" == "$template_owner" ]]; then
+    warn "现有 .env 缺少有效的 OWNER_USER_IDS，或仍在使用官方模板占位值，需要补充唯一超级管理员 ID。"
+    while true; do
+      prompt_text UPDATE_OWNER_USER_IDS "请输入唯一超级管理员用户 ID（只能填写一个数字 ID）"
+      UPDATE_OWNER_USER_IDS="${UPDATE_OWNER_USER_IDS//[[:space:]]/}"
+      if [[ "$UPDATE_OWNER_USER_IDS" =~ ^[0-9]+$ ]]; then
+        break
+      fi
+      warn "超级管理员必须且只能填写一个正整数用户 ID。"
+    done
+  fi
+}
+
+apply_update_migrations() {
+  if [[ -n "$UPDATE_OWNER_USER_IDS" ]]; then
+    replace_env_value "${INSTALL_DIR}/.env" OWNER_USER_IDS "$UPDATE_OWNER_USER_IDS"
+    chmod 600 "${INSTALL_DIR}/.env"
+    chown "$SERVICE_USER:$SERVICE_GROUP" "${INSTALL_DIR}/.env"
+  fi
 }
 
 install_binary() {
-  [[ ! -L "${INSTALL_DIR}/go-bot" ]] || fatal "程序文件不能是符号链接：${INSTALL_DIR}/go-bot"
-  install -m 0755 -o root -g root "$DOWNLOADED_BINARY" "${INSTALL_DIR}/go-bot"
+  [[ -n "$INSTALLED_BINARY_PATH" ]] || fatal "尚未确定当前架构的二进制安装路径。"
+  [[ ! -L "$INSTALLED_BINARY_PATH" ]] || fatal "程序文件不能是符号链接：${INSTALLED_BINARY_PATH}"
+  install -m 0755 -o root -g root "$DOWNLOADED_BINARY" "$INSTALLED_BINARY_PATH"
+
+  if [[ "$LEGACY_BINARY_PATH" != "$INSTALLED_BINARY_PATH" ]] \
+    && [[ -e "$LEGACY_BINARY_PATH" || -L "$LEGACY_BINARY_PATH" ]]; then
+    rm -f -- "$LEGACY_BINARY_PATH"
+    info "已清理旧版脚本重命名的二进制文件：${LEGACY_BINARY_PATH}"
+  fi
 }
 
 write_version_file() {
@@ -460,7 +522,7 @@ Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=${INSTALL_DIR}/go-bot
+ExecStart=${INSTALLED_BINARY_PATH}
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
@@ -468,7 +530,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=full
-ReadWritePaths=${INSTALL_DIR}/data
+ReadWritePaths=${INSTALL_DIR}
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
@@ -507,11 +570,21 @@ start_and_check_service() {
 }
 
 installation_exists() {
-  [[ -d "$INSTALL_DIR" || -x "${INSTALL_DIR}/go-bot" || -f "${INSTALL_DIR}/.env" || -f "$SYSTEMD_UNIT" ]]
+  [[ -d "$INSTALL_DIR" || -x "$INSTALLED_BINARY_PATH" || -x "$LEGACY_BINARY_PATH" \
+    || -f "${INSTALL_DIR}/.env" || -f "$SYSTEMD_UNIT" ]]
 }
 
 installation_is_usable() {
-  [[ -x "${INSTALL_DIR}/go-bot" && -f "${INSTALL_DIR}/.env" ]]
+  [[ -f "${INSTALL_DIR}/.env" ]] \
+    && { [[ -x "$INSTALLED_BINARY_PATH" ]] || [[ -x "$LEGACY_BINARY_PATH" ]]; }
+}
+installation_needs_refresh() {
+  [[ -x "$INSTALLED_BINARY_PATH" ]] || return 0
+  [[ -f "$SYSTEMD_UNIT" ]] || return 0
+  grep -Fqx "ExecStart=${INSTALLED_BINARY_PATH}" "$SYSTEMD_UNIT" || return 0
+  grep -Fqx "ReadWritePaths=${INSTALL_DIR}" "$SYSTEMD_UNIT" || return 0
+  [[ -d "${INSTALL_DIR}/logs" ]] || return 0
+  return 1
 }
 
 read_installed_version() {
@@ -542,6 +615,10 @@ show_installation_status() {
 print_management_help() {
   cat <<EOF
 
+程序文件：${INSTALLED_BINARY_PATH}
+配置文件：${INSTALL_DIR}/.env
+日志目录：${INSTALL_DIR}/logs
+
 常用管理命令：
   查看状态：systemctl status ${SERVICE_NAME}
   重启服务：systemctl restart ${SERVICE_NAME}
@@ -549,7 +626,6 @@ print_management_help() {
   启动服务：systemctl start ${SERVICE_NAME}
   查看日志：journalctl -u ${SERVICE_NAME} -f
 
-配置文件：${INSTALL_DIR}/.env
 修改配置后执行：systemctl restart ${SERVICE_NAME}
 EOF
 }
@@ -598,14 +674,18 @@ update_application() {
 
   installed_version="$(read_installed_version)"
   prepare_release
+  collect_update_migrations
 
   printf '\n更新检查：\n'
   printf '  当前版本：%s\n' "$installed_version"
   printf '  目标版本：%s\n' "$RESOLVED_VERSION"
-  if [[ "$installed_version" == "$RESOLVED_VERSION" ]]; then
-    info "当前已经是目标版本，无需更新。如需强制覆盖程序，请选择 3 重新安装。"
+  if [[ "$installed_version" == "$RESOLVED_VERSION" ]] && ! installation_needs_refresh \
+    && [[ -z "$UPDATE_OWNER_USER_IDS" ]]; then
+    info "当前程序、配置和 systemd 服务已经是目标状态，无需更新。"
     cleanup_temp
     return
+  elif [[ "$installed_version" == "$RESOLVED_VERSION" ]]; then
+    info "版本号未变化，但检测到旧文件名、旧服务配置或缺失的新版必填配置，将继续执行迁移。"
   fi
 
   prompt_yes_no CONFIRM_UPDATE "确认更新程序？配置和数据库将保持不变" "TRUE"
@@ -619,6 +699,7 @@ update_application() {
   ensure_install_directories
   install_template_reference
   preserve_environment_permissions
+  apply_update_migrations
   install_binary
   write_version_file
   write_systemd_unit
@@ -718,7 +799,7 @@ uninstall_application() {
   printf '\n即将完整卸载：\n'
   printf '  systemd 服务：%s\n' "$SERVICE_NAME"
   printf '  安装目录：%s\n' "$INSTALL_DIR"
-  warn "该操作会永久删除 .env 配置和 SQLite 数据库，无法恢复。"
+  warn "该操作会永久删除 .env 配置、SQLite 数据库和日志文件，无法恢复。"
   prompt_yes_no CONFIRM_UNINSTALL "确认继续卸载？" "FALSE"
   if [[ "$CONFIRM_UNINSTALL" != "TRUE" ]]; then
     warn "已取消卸载。"
@@ -762,6 +843,7 @@ main() {
   require_root
   validate_settings
   command_exists systemctl || fatal "当前系统没有 systemctl；此脚本仅适用于使用 systemd 的 Linux 发行版。"
+  detect_architecture quiet
   open_input_stream
 
   if (( $# > 0 )); then
