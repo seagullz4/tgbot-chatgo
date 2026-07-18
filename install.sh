@@ -398,6 +398,10 @@ ensure_install_directories() {
 
 replace_env_value() {
   local env_file="$1" key="$2" replacement="$3" temp_file line found=0
+  [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]] || fatal "临时工作目录尚未准备好，无法修改配置。"
+  [[ "$env_file" == "${TEMP_DIR}/"* ]] || fatal "拒绝直接修改安装目录中的配置文件：${env_file}"
+  [[ -f "$env_file" && ! -L "$env_file" ]] || fatal "配置工作文件无效：${env_file}"
+
   temp_file="$(mktemp "${TEMP_DIR}/env-update.XXXXXX")"
   while IFS= read -r line || [[ -n "$line" ]]; do
     if [[ "$line" == "${key}="* ]]; then
@@ -411,8 +415,21 @@ replace_env_value() {
   if (( found == 0 )); then
     printf '\n%s=%s\n' "$key" "$replacement" >>"$temp_file"
   fi
-  cat "$temp_file" >"$env_file"
-  rm -f -- "$temp_file"
+  mv -f -- "$temp_file" "$env_file"
+}
+
+commit_environment_file() {
+  local source_file="$1" destination="$2" pending_file="${INSTALL_DIR}/.env.installing"
+  [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]] || fatal "临时工作目录尚未准备好，无法提交配置。"
+  [[ "$source_file" == "${TEMP_DIR}/"* ]] || fatal "配置提交源文件必须位于临时工作目录：${source_file}"
+  [[ -f "$source_file" && ! -L "$source_file" ]] || fatal "配置提交源文件无效：${source_file}"
+  [[ ! -L "$destination" ]] || fatal "配置文件不能是符号链接：${destination}"
+  [[ ! -e "$destination" || -f "$destination" ]] || fatal "配置文件目标不是普通文件：${destination}"
+
+  rm -f -- "$pending_file"
+  [[ ! -e "$pending_file" && ! -L "$pending_file" ]] || fatal "无法清理临时配置文件：${pending_file}"
+  install -m 0600 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$source_file" "$pending_file"
+  mv -f -- "$pending_file" "$destination"
 }
 
 install_template_reference() {
@@ -422,23 +439,23 @@ install_template_reference() {
 }
 
 write_environment_file() {
-  local env_file="${INSTALL_DIR}/.env"
+  local env_file="${INSTALL_DIR}/.env" staged_env
   [[ ! -L "$env_file" ]] || fatal "配置文件不能是符号链接：${env_file}"
 
   install_template_reference
-  install -m 0600 -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$DOWNLOADED_ENV_EXAMPLE" "$env_file"
-  replace_env_value "$env_file" APP_NAME "$(env_value "$BOT_APP_NAME")"
-  replace_env_value "$env_file" BOT_TOKEN "$(env_value "$BOT_TOKEN")"
-  replace_env_value "$env_file" ADMIN_GROUP_ID "$ADMIN_GROUP_ID"
-  replace_env_value "$env_file" ADMIN_USER_IDS "$ADMIN_USER_IDS"
-  replace_env_value "$env_file" OWNER_USER_IDS "$OWNER_USER_IDS"
-  replace_env_value "$env_file" DELETE_TOPIC_AS_FOREVER_BAN "$DELETE_TOPIC_AS_FOREVER_BAN"
-  replace_env_value "$env_file" DELETE_USER_MESSAGE_ON_CLEAR_CMD "$DELETE_USER_MESSAGE_ON_CLEAR_CMD"
-  replace_env_value "$env_file" DISABLE_VERIFICATION "$DISABLE_VERIFICATION"
-  replace_env_value "$env_file" MESSAGE_INTERVAL "$MESSAGE_INTERVAL"
-  replace_env_value "$env_file" USER_FORWARD_ACK "$USER_FORWARD_ACK"
-  chmod 600 "$env_file"
-  chown "$SERVICE_USER:$SERVICE_GROUP" "$env_file"
+  staged_env="$(mktemp "${TEMP_DIR}/env-new.XXXXXX")"
+  cp -- "$DOWNLOADED_ENV_EXAMPLE" "$staged_env"
+  replace_env_value "$staged_env" APP_NAME "$(env_value "$BOT_APP_NAME")"
+  replace_env_value "$staged_env" BOT_TOKEN "$(env_value "$BOT_TOKEN")"
+  replace_env_value "$staged_env" ADMIN_GROUP_ID "$ADMIN_GROUP_ID"
+  replace_env_value "$staged_env" ADMIN_USER_IDS "$ADMIN_USER_IDS"
+  replace_env_value "$staged_env" OWNER_USER_IDS "$OWNER_USER_IDS"
+  replace_env_value "$staged_env" DELETE_TOPIC_AS_FOREVER_BAN "$DELETE_TOPIC_AS_FOREVER_BAN"
+  replace_env_value "$staged_env" DELETE_USER_MESSAGE_ON_CLEAR_CMD "$DELETE_USER_MESSAGE_ON_CLEAR_CMD"
+  replace_env_value "$staged_env" DISABLE_VERIFICATION "$DISABLE_VERIFICATION"
+  replace_env_value "$staged_env" MESSAGE_INTERVAL "$MESSAGE_INTERVAL"
+  replace_env_value "$staged_env" USER_FORWARD_ACK "$USER_FORWARD_ACK"
+  commit_environment_file "$staged_env" "$env_file"
 }
 
 preserve_environment_permissions() {
@@ -483,10 +500,14 @@ collect_update_migrations() {
 }
 
 apply_update_migrations() {
+  local staged_env
   if [[ -n "$UPDATE_OWNER_USER_IDS" ]]; then
-    replace_env_value "${INSTALL_DIR}/.env" OWNER_USER_IDS "$UPDATE_OWNER_USER_IDS"
-    chmod 600 "${INSTALL_DIR}/.env"
-    chown "$SERVICE_USER:$SERVICE_GROUP" "${INSTALL_DIR}/.env"
+    [[ ! -L "${INSTALL_DIR}/.env" ]] || fatal "配置文件不能是符号链接：${INSTALL_DIR}/.env"
+    [[ -f "${INSTALL_DIR}/.env" ]] || fatal "缺少配置文件：${INSTALL_DIR}/.env"
+    staged_env="$(mktemp "${TEMP_DIR}/env-migration.XXXXXX")"
+    cp -- "${INSTALL_DIR}/.env" "$staged_env"
+    replace_env_value "$staged_env" OWNER_USER_IDS "$UPDATE_OWNER_USER_IDS"
+    commit_environment_file "$staged_env" "${INSTALL_DIR}/.env"
   fi
 }
 
