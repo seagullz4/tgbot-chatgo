@@ -146,7 +146,7 @@ resolve_release() {
 }
 
 download_release() {
-  local asset_name archive_file extracted_binary
+  local asset_name archive_file extracted_binary extracted_env_example
   asset_name="go-bot-linux-${RELEASE_ARCH}.zip"
   BINARY_ASSET="go-bot-linux-${RELEASE_ARCH}"
   archive_file="${TEMP_DIR}/${asset_name}"
@@ -158,8 +158,11 @@ download_release() {
 
   unzip -q "$archive_file" -d "${TEMP_DIR}/release" || fatal "安装包解压失败。"
   extracted_binary="$(find "${TEMP_DIR}/release" -type f -name "$BINARY_ASSET" -print -quit)"
+  extracted_env_example="$(find "${TEMP_DIR}/release" -type f -name '.env.example' -print -quit)"
   [[ -n "$extracted_binary" ]] || fatal "安装包中未找到可执行文件：${BINARY_ASSET}"
+  [[ -n "$extracted_env_example" ]] || fatal "安装包中未找到 .env.example，无法生成带注释的配置文件。"
   DOWNLOADED_BINARY="$extracted_binary"
+  DOWNLOADED_ENV_EXAMPLE="$extracted_env_example"
 }
 
 prepare_release() {
@@ -259,7 +262,52 @@ env_value() {
   fi
 }
 
+read_template_value() {
+  local key="$1" fallback="$2" line value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "${key}="* ]]; then
+      value="${line#*=}"
+      if (( ${#value} >= 2 )); then
+        if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] \
+          || [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+          value="${value:1:${#value}-2}"
+        fi
+      fi
+      printf '%s' "$value"
+      return
+    fi
+  done <"$DOWNLOADED_ENV_EXAMPLE"
+  printf '%s' "$fallback"
+}
+
+read_template_bool() {
+  local key="$1" fallback="$2" value
+  value="$(read_template_value "$key" "$fallback")"
+  case "${value^^}" in
+    TRUE|FALSE) printf '%s' "${value^^}" ;;
+    *) printf '%s' "$fallback" ;;
+  esac
+}
+
+read_template_integer() {
+  local key="$1" fallback="$2" value
+  value="$(read_template_value "$key" "$fallback")"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
 collect_configuration() {
+  local default_app_name default_disable_verification default_message_interval
+  local default_forward_ack default_topic_ban default_clear_messages
+  default_app_name="$(read_template_value APP_NAME 'baibai-bot')"
+  default_disable_verification="$(read_template_bool DISABLE_VERIFICATION FALSE)"
+  default_message_interval="$(read_template_integer MESSAGE_INTERVAL 0)"
+  default_forward_ack="$(read_template_bool USER_FORWARD_ACK TRUE)"
+  default_topic_ban="$(read_template_bool DELETE_TOPIC_AS_FOREVER_BAN FALSE)"
+  default_clear_messages="$(read_template_bool DELETE_USER_MESSAGE_ON_CLEAR_CMD TRUE)"
   printf '\n'
   info "开始配置 Telegram 机器人。ID 获取说明：${GITHUB_REPO_URL}/blob/main/README2.md"
   printf '  1. 使用 @BotFather 创建机器人并取得 Bot Token。\n'
@@ -293,17 +341,12 @@ collect_configuration() {
     warn "管理员 ID 必须是正整数，多人之间使用英文逗号。"
   done
 
-  prompt_text BOT_APP_NAME "请输入应用名称" "interactive-bot"
-  WELCOME_MESSAGE="你好，我是客服机器人。请直接发送消息联系我们。"
-  prompt_yes_no DISABLE_VERIFICATION "是否关闭加减乘除安全验证？" "FALSE"
-  prompt_integer MESSAGE_INTERVAL "用户连续发送消息的最小间隔（秒，0 表示不限制）" "5" "0" "86400"
-  prompt_yes_no USER_FORWARD_ACK "成功转发后，是否向用户发送「已转达客服」的回执？" "TRUE"
-  prompt_yes_no DELETE_TOPIC_AS_FOREVER_BAN "管理员删除用户话题后，是否永久禁止该用户自动新建话题？" "FALSE"
-  prompt_yes_no DELETE_USER_MESSAGE_ON_CLEAR_CMD "执行 /clear 后，是否同时删除用户私聊中的已映射消息？" "TRUE"
-
-  BOT_WORKERS="4"
-  POLL_TIMEOUT_SECONDS="50"
-  HTTP_MAX_IDLE_PER_HOST="16"
+  prompt_text BOT_APP_NAME "请输入应用名称" "$default_app_name"
+  prompt_yes_no DISABLE_VERIFICATION "是否关闭加减乘除安全验证？" "$default_disable_verification"
+  prompt_integer MESSAGE_INTERVAL "用户连续发送消息的最小间隔（秒，0 表示不限制）" "$default_message_interval" "0" "86400"
+  prompt_yes_no USER_FORWARD_ACK "成功转发后，是否向用户发送「已转达客服」的回执？" "$default_forward_ack"
+  prompt_yes_no DELETE_TOPIC_AS_FOREVER_BAN "管理员删除用户话题后，是否永久禁止该用户自动新建话题？" "$default_topic_ban"
+  prompt_yes_no DELETE_USER_MESSAGE_ON_CLEAR_CMD "执行 /clear 后，是否同时删除用户私聊中的已映射消息？" "$default_clear_messages"
   validate_single_line "应用名称" "$BOT_APP_NAME"
 }
 
@@ -341,31 +384,48 @@ ensure_install_directories() {
   chown -R "$SERVICE_USER:$SERVICE_GROUP" "${INSTALL_DIR}/data"
 }
 
+replace_env_value() {
+  local env_file="$1" key="$2" replacement="$3" temp_file line found=0
+  temp_file="$(mktemp "${TEMP_DIR}/env-update.XXXXXX")"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "${key}="* ]]; then
+      printf '%s=%s\n' "$key" "$replacement"
+      found=1
+    else
+      printf '%s\n' "$line"
+    fi
+  done <"$env_file" >"$temp_file"
+
+  if (( found == 0 )); then
+    printf '\n%s=%s\n' "$key" "$replacement" >>"$temp_file"
+  fi
+  cat "$temp_file" >"$env_file"
+  rm -f -- "$temp_file"
+}
+
+install_template_reference() {
+  local template_file="${INSTALL_DIR}/.env.example"
+  [[ ! -L "$template_file" ]] || fatal "配置模板不能是符号链接：${template_file}"
+  install -m 0644 -o root -g root "$DOWNLOADED_ENV_EXAMPLE" "$template_file"
+}
+
 write_environment_file() {
   local env_file="${INSTALL_DIR}/.env"
   [[ ! -L "$env_file" ]] || fatal "配置文件不能是符号链接：${env_file}"
-  install -m 0640 -o root -g "$SERVICE_GROUP" /dev/null "$env_file"
-  cat >"$env_file" <<EOF
-# 由 tgbot-chatgo 一键安装脚本生成
-APP_NAME=$(env_value "$BOT_APP_NAME")
-BOT_TOKEN=$(env_value "$BOT_TOKEN")
-WELCOME_MESSAGE=$(env_value "$WELCOME_MESSAGE")
 
-# 管理群必须是已开启 Topics/话题 的超级群
-ADMIN_GROUP_ID=${ADMIN_GROUP_ID}
-ADMIN_USER_IDS=${ADMIN_USER_IDS}
-
-DELETE_TOPIC_AS_FOREVER_BAN=${DELETE_TOPIC_AS_FOREVER_BAN}
-DELETE_USER_MESSAGE_ON_CLEAR_CMD=${DELETE_USER_MESSAGE_ON_CLEAR_CMD}
-DISABLE_VERIFICATION=${DISABLE_VERIFICATION}
-MESSAGE_INTERVAL=${MESSAGE_INTERVAL}
-USER_FORWARD_ACK=${USER_FORWARD_ACK}
-
-DATABASE_PATH=data/db.sqlite3
-BOT_WORKERS=${BOT_WORKERS}
-POLL_TIMEOUT_SECONDS=${POLL_TIMEOUT_SECONDS}
-HTTP_MAX_IDLE_PER_HOST=${HTTP_MAX_IDLE_PER_HOST}
-EOF
+  install_template_reference
+  install -m 0640 -o root -g "$SERVICE_GROUP" "$DOWNLOADED_ENV_EXAMPLE" "$env_file"
+  replace_env_value "$env_file" APP_NAME "$(env_value "$BOT_APP_NAME")"
+  replace_env_value "$env_file" BOT_TOKEN "$(env_value "$BOT_TOKEN")"
+  replace_env_value "$env_file" ADMIN_GROUP_ID "$ADMIN_GROUP_ID"
+  replace_env_value "$env_file" ADMIN_USER_IDS "$ADMIN_USER_IDS"
+  replace_env_value "$env_file" DELETE_TOPIC_AS_FOREVER_BAN "$DELETE_TOPIC_AS_FOREVER_BAN"
+  replace_env_value "$env_file" DELETE_USER_MESSAGE_ON_CLEAR_CMD "$DELETE_USER_MESSAGE_ON_CLEAR_CMD"
+  replace_env_value "$env_file" DISABLE_VERIFICATION "$DISABLE_VERIFICATION"
+  replace_env_value "$env_file" MESSAGE_INTERVAL "$MESSAGE_INTERVAL"
+  replace_env_value "$env_file" USER_FORWARD_ACK "$USER_FORWARD_ACK"
+  chmod 640 "$env_file"
+  chown root:"$SERVICE_GROUP" "$env_file"
 }
 
 preserve_environment_permissions() {
@@ -500,8 +560,8 @@ install_application() {
     return
   fi
 
-  collect_configuration
   prepare_release
+  collect_configuration
 
   printf '\n即将首次安装：\n'
   printf '  版本：%s (%s)\n' "$RESOLVED_VERSION" "$RELEASE_ARCH"
@@ -557,6 +617,7 @@ update_application() {
 
   stop_service_if_running
   ensure_install_directories
+  install_template_reference
   preserve_environment_permissions
   install_binary
   write_version_file
@@ -577,6 +638,7 @@ reinstall_application() {
     had_existing_install="TRUE"
   fi
 
+  prepare_release
   collect_configuration
   if [[ "$had_existing_install" == "TRUE" && -d "${INSTALL_DIR}/data" ]]; then
     prompt_yes_no KEEP_DATABASE "是否保留现有 SQLite 数据库？" "TRUE"
@@ -584,7 +646,6 @@ reinstall_application() {
     KEEP_DATABASE="FALSE"
   fi
 
-  prepare_release
   printf '\n即将重新安装：\n'
   printf '  目标版本：%s (%s)\n' "$RESOLVED_VERSION" "$RELEASE_ARCH"
   printf '  重写配置：是\n'
