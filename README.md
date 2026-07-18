@@ -11,15 +11,16 @@ bash <(curl -sSL https://raw.githubusercontent.com/seagullz4/tgbot-chatgo/main/i
 ```
 
 方法二：
-下载最新的[release](https://github.com/seagullz4/tgbot-chatgo/releases)文件并且解压到Linux服务器上面，新建一个文件夹
+1. 下载最新 [release](https://github.com/seagullz4/tgbot-chatgo/releases) 压缩包，并上传到 Linux 服务器  
+2. 新建目录并解压：
 ```bash
 mkdir tgbot-chatgo
 cd tgbot-chatgo
-#下载最新压缩包
+# 将 xxxxx.zip 换成你实际下载的压缩包名称
 unzip xxxxx.zip
 ```
-必须正确填写.env里面的文件内容
-关于如何获取你的id包括机器人id和群组id，请看[id获取文档](https://github.com/seagullz4/tgbot-chatgo/blob/main/README2.md)
+3. 正确填写 `.env` 文件内容  
+关于如何获取机器人 ID、群组 ID 等信息，请看 [id获取文档](https://github.com/seagullz4/tgbot-chatgo/blob/main/README2.md)
 
 示例：
 ```bash
@@ -32,12 +33,12 @@ WELCOME_MESSAGE="你好，我是客服机器人。请直接发送消息联系我
 ADMIN_GROUP_ID=-1001234567890
 ADMIN_USER_IDS=123456789,987654321
 ```
-之后对软件包进行授予权限，并进行执行二进制文件
+4. 给程序执行权限并启动：
 ```bash
 chmod +x bot-linux-amd64
-#或者 chmod +x bot-linux-arm64
+# 或者：chmod +x bot-linux-arm64
 ./bot-linux-amd64
-#或者./bot-linux-arm64 
+# 或者：./bot-linux-arm64
 ```
 
 低内存占用
