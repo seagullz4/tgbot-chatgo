@@ -18,7 +18,7 @@ cd tgbot-chatgo
 #下载最新压缩包
 unzip xxxxx.zip
 ```
-必须正确填写./env里面的文件内容
+必须正确填写.env里面的文件内容
 关于如何获取你的id包括机器人id和群组id，请看[id获取文档](https://github.com/seagullz4/tgbot-chatgo/blob/main/README2.md)
 
 示例：
