@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -123,11 +124,83 @@ func TestEditMirroredUserMessage(t *testing.T) {
 	if httpClient.text != "我好(修改前：你好)" {
 		t.Fatalf("edited text = %q", httpClient.text)
 	}
-	mapping, err := messageStore.GetByUserMessageID(10)
+	mapping, err := messageStore.GetByUserMessageID(123, 10)
 	if err != nil {
 		t.Fatalf("reload mapping: %v", err)
 	}
 	if mapping.MessageText != "我好" {
 		t.Fatalf("stored latest text = %q", mapping.MessageText)
+	}
+}
+func TestAdminForwardFailureMessageForDeletedReply(t *testing.T) {
+	err := errors.New("bad request, Bad Request: message to be replied not found")
+	if got := adminForwardFailureMessage(err); got != "当前回复引用的信息被对方删除" {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+func TestAdminForwardFailureMessagePreservesOtherErrors(t *testing.T) {
+	err := errors.New("network unavailable")
+	if got := adminForwardFailureMessage(err); got != "发送失败: network unavailable" {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+type deletedReplyHTTPClient struct {
+	noticeText string
+}
+
+func (client *deletedReplyHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	if err := request.ParseMultipartForm(1 << 20); err != nil {
+		_ = request.ParseForm()
+	}
+	body := `{"ok":true,"result":{"message_id":31,"date":0,"chat":{"id":-100,"type":"supergroup"}}}`
+	if strings.HasSuffix(request.URL.Path, "/copyMessage") {
+		body = `{"ok":false,"error_code":400,"description":"Bad Request: message to be replied not found"}`
+	}
+	if strings.HasSuffix(request.URL.Path, "/sendMessage") {
+		client.noticeText = request.FormValue("text")
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+func TestForwardAdminToUserExplainsDeletedReply(t *testing.T) {
+	messageStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "deleted-reply.sqlite3"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer messageStore.Close()
+	if _, err := messageStore.EnsureUser(&model.User{UserID: 123}); err != nil {
+		t.Fatal(err)
+	}
+	if err := messageStore.UpdateUserThreadID(123, 55); err != nil {
+		t.Fatal(err)
+	}
+	if err := messageStore.SaveMessageMap(&model.MessageMap{UserChatMessageID: 10, GroupChatMessageID: 20, UserID: 123}); err != nil {
+		t.Fatal(err)
+	}
+
+	httpClient := &deletedReplyHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	services := New(&config.Config{AdminGroupID: -100}, messageStore, job.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	err = services.ForwardAdminToUser(context.Background(), telegramBot, &models.Message{
+		ID:              30,
+		Text:            "reply",
+		MessageThreadID: 55,
+		Chat:            models.Chat{ID: -100, Type: models.ChatTypeSupergroup},
+		ReplyToMessage:  &models.Message{ID: 20},
+	})
+	if err == nil {
+		t.Fatal("expected Telegram reply error")
+	}
+	if httpClient.noticeText != "当前回复引用的信息被对方删除" {
+		t.Fatalf("notice = %q", httpClient.noticeText)
 	}
 }

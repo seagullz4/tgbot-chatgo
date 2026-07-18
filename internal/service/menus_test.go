@@ -12,12 +12,13 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"telegram-interactive-bot/go-bot/internal/command"
 	"telegram-interactive-bot/go-bot/internal/config"
 )
 
 func TestCommandMenusSeparateUserAndAdminCommands(t *testing.T) {
 	userCommands := commandSet(UserCommandMenu())
-	for _, command := range []string{"ban", "unban", "banned", "info", "close", "open", "clear", "broadcast", "say"} {
+	for _, command := range []string{"ban", "unban", "banned", "info", "close", "open", "clear", "say"} {
 		if userCommands[command] {
 			t.Fatalf("user command menu exposes admin command /%s", command)
 		}
@@ -29,14 +30,14 @@ func TestCommandMenusSeparateUserAndAdminCommands(t *testing.T) {
 			t.Fatalf("admin private menu missing /%s", command)
 		}
 	}
-	for _, command := range []string{"ban", "close", "open", "clear", "broadcast", "say"} {
+	for _, command := range []string{"ban", "close", "open", "clear", "say"} {
 		if adminPrivate[command] {
 			t.Fatalf("admin private menu exposes group-only command /%s", command)
 		}
 	}
 
 	adminGroup := commandSet(AdminGroupCommandMenu())
-	for _, command := range []string{"info", "banned", "close", "open", "ban", "unban", "clear", "broadcast", "say"} {
+	for _, command := range []string{"info", "banned", "close", "open", "ban", "unban", "clear", "say"} {
 		if !adminGroup[command] {
 			t.Fatalf("admin group menu missing /%s", command)
 		}
@@ -122,7 +123,37 @@ func TestRegisterCommandMenusUsesSeparateTelegramScopes(t *testing.T) {
 	if !strings.Contains(client.commands[2], "\"banned\"") || strings.Contains(client.commands[2], "\"close\"") {
 		t.Fatalf("admin private commands are incorrect: %s", client.commands[2])
 	}
-	if !strings.Contains(client.commands[3], "\"close\"") || !strings.Contains(client.commands[3], "\"broadcast\"") {
+	if !strings.Contains(client.commands[3], "\"close\"") || !strings.Contains(client.commands[3], "\"say\"") {
 		t.Fatalf("admin group commands are incomplete: %s", client.commands[3])
+	}
+}
+func TestOwnerKeyboardAndCommandExposeFunctionManagement(t *testing.T) {
+	ownerKeyboard := OwnerKeyboard()
+	foundShortcut := false
+	for _, row := range ownerKeyboard.Keyboard {
+		for _, button := range row {
+			if button.Text == command.ShortcutFunctionManagement {
+				foundShortcut = true
+			}
+		}
+	}
+	if !foundShortcut {
+		t.Fatal("owner keyboard missing function management shortcut")
+	}
+	for _, row := range AdminKeyboard().Keyboard {
+		for _, button := range row {
+			if button.Text == command.ShortcutFunctionManagement {
+				t.Fatal("ordinary admin keyboard exposes function management")
+			}
+		}
+	}
+	foundCommand := false
+	for _, item := range OwnerPrivateCommandMenu() {
+		if item.Command == "function" && item.Description == "功能管理" {
+			foundCommand = true
+		}
+	}
+	if !foundCommand {
+		t.Fatal("owner command menu missing /function 功能管理")
 	}
 }

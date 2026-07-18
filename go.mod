@@ -2,6 +2,8 @@ module telegram-interactive-bot/go-bot
 
 go 1.22
 
+toolchain go1.25.12
+
 require (
 	github.com/go-telegram/bot v1.22.0
 	modernc.org/sqlite v1.34.5

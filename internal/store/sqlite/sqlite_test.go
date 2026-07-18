@@ -83,10 +83,10 @@ func TestMessageTextMigrationAndUpdates(t *testing.T) {
 	if err := store.SaveMessageMap(mapping); err != nil {
 		t.Fatalf("save mapping: %v", err)
 	}
-	if err := store.UpdateMessageTextByUserMessageID(10, "我好"); err != nil {
+	if err := store.UpdateMessageTextByUserMessageID(30, 10, "我好"); err != nil {
 		t.Fatalf("update by user message id: %v", err)
 	}
-	got, err := store.GetByUserMessageID(10)
+	got, err := store.GetByUserMessageID(30, 10)
 	if err != nil {
 		t.Fatalf("get by user message id: %v", err)
 	}
@@ -197,5 +197,90 @@ func TestOpenCreatesMissingParentDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(databasePath)); err != nil {
 		t.Fatalf("database parent directory was not created: %v", err)
+	}
+}
+
+func TestUserMessageMappingsAreScopedByUser(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "mapping-scope.sqlite3"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first := &model.MessageMap{UserID: 101, UserChatMessageID: 7, GroupChatMessageID: 1001, MessageText: "first"}
+	second := &model.MessageMap{UserID: 202, UserChatMessageID: 7, GroupChatMessageID: 2002, MessageText: "second"}
+	if err := store.SaveMessageMap(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveMessageMap(second); err != nil {
+		t.Fatal(err)
+	}
+	gotFirst, err := store.GetByUserMessageID(101, 7)
+	if err != nil || gotFirst == nil || gotFirst.GroupChatMessageID != 1001 {
+		t.Fatalf("first mapping = %#v, err = %v", gotFirst, err)
+	}
+	gotSecond, err := store.GetByUserMessageID(202, 7)
+	if err != nil || gotSecond == nil || gotSecond.GroupChatMessageID != 2002 {
+		t.Fatalf("second mapping = %#v, err = %v", gotSecond, err)
+	}
+	if err := store.UpdateMessageTextByUserMessageID(101, 7, "updated"); err != nil {
+		t.Fatal(err)
+	}
+	gotSecond, err = store.GetByUserMessageID(202, 7)
+	if err != nil || gotSecond == nil || gotSecond.MessageText != "second" {
+		t.Fatalf("second mapping was modified: %#v, err = %v", gotSecond, err)
+	}
+}
+
+func TestResetConversationRouting(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "reset-routing.sqlite3"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.EnsureUser(&model.User{UserID: 42, MessageThreadID: 77}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateUserThreadID(42, 77); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertForumStatus(&model.ForumStatus{ChatID: -100, MessageThreadID: 77, Status: "opened"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveMessageMap(&model.MessageMap{UserChatMessageID: 1, GroupChatMessageID: 2, UserID: 42}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveMediaGroupMessage(&model.MediaGroupMessage{ChatID: 42, MessageID: 3, MediaGroupID: "album"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ResetConversationRouting(); err != nil {
+		t.Fatal(err)
+	}
+	user, err := store.GetUserByTelegramID(42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.MessageThreadID != 0 {
+		t.Fatalf("thread id = %d", user.MessageThreadID)
+	}
+	status, err := store.GetForumStatus(77)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != nil {
+		t.Fatalf("status remains: %+v", status)
+	}
+	mapping, err := store.GetByUserMessageID(42, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapping != nil {
+		t.Fatalf("mapping remains: %+v", mapping)
+	}
+	media, err := store.ListMediaGroupMessages(42, "album")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(media) != 0 {
+		t.Fatalf("media remains: %+v", media)
 	}
 }

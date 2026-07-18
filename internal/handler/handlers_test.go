@@ -13,6 +13,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"telegram-interactive-bot/go-bot/internal/command"
 	"telegram-interactive-bot/go-bot/internal/config"
 	"telegram-interactive-bot/go-bot/internal/job"
 	"telegram-interactive-bot/go-bot/internal/model"
@@ -20,39 +21,31 @@ import (
 	storesqlite "telegram-interactive-bot/go-bot/internal/store/sqlite"
 )
 
-func TestStartCommandPatternMatchesTelegramCommand(t *testing.T) {
-	called := false
-	telegramBot, err := bot.New("123456:test-token",
-		bot.WithSkipGetMe(),
-		bot.WithNotAsyncHandlers(),
-		bot.WithDefaultHandler(func(context.Context, *bot.Bot, *models.Update) {
-			t.Fatal("default handler received /start")
-		}),
-	)
-	if err != nil {
-		t.Fatalf("create bot: %v", err)
+func TestMatchesCommand(t *testing.T) {
+	tests := []struct {
+		name        string
+		text        string
+		command     string
+		botUsername string
+		want        bool
+	}{
+		{name: "bare command", text: "/help", command: "help", botUsername: "SupportBot", want: true},
+		{name: "addressed command", text: "/help@SupportBot", command: "help", botUsername: "SupportBot", want: true},
+		{name: "case insensitive", text: "/HELP@supportbot", command: "help", botUsername: "SupportBot", want: true},
+		{name: "addressed command with arguments", text: "/help@SupportBot details", command: "help", botUsername: "SupportBot", want: true},
+		{name: "other bot", text: "/help@AnotherBot", command: "help", botUsername: "SupportBot", want: false},
+		{name: "different command", text: "/status@SupportBot", command: "help", botUsername: "SupportBot", want: false},
+		{name: "missing bot username", text: "/help@SupportBot", command: "help", want: false},
+		{name: "not a command", text: "help", command: "help", botUsername: "SupportBot", want: false},
 	}
-	telegramBot.RegisterHandler(
-		bot.HandlerTypeMessageText,
-		commandStart,
-		bot.MatchTypeCommandStartOnly,
-		func(context.Context, *bot.Bot, *models.Update) { called = true },
-	)
 
-	telegramBot.ProcessUpdate(context.Background(), &models.Update{
-		ID: 1,
-		Message: &models.Message{
-			Text: "/start",
-			Entities: []models.MessageEntity{{
-				Type:   models.MessageEntityTypeBotCommand,
-				Offset: 0,
-				Length: 6,
-			}},
-		},
-	})
-
-	if !called {
-		t.Fatal("/start did not match the registered command")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			update := &models.Update{Message: &models.Message{Text: test.text}}
+			if got := command.Matches(update, test.command, test.botUsername); got != test.want {
+				t.Fatalf("matchesCommand(%q, %q, %q) = %v, want %v", test.text, test.command, test.botUsername, got, test.want)
+			}
+		})
 	}
 }
 
@@ -262,5 +255,20 @@ func TestAdminStartDoesNotCreateOrdinaryUserRecord(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(httpClient.texts, "\n"), "管理员账号不会进入普通用户会话") {
 		t.Fatalf("admin welcome text = %q", httpClient.texts)
+	}
+}
+func TestOwnerPrivateKeyboardUsesFunctionManagement(t *testing.T) {
+	handlers := New(&service.Services{Cfg: &config.Config{OwnerUserIDs: map[int64]struct{}{10: {}}}}, nil)
+	keyboard := handlers.privateKeyboard(10)
+	found := false
+	for _, row := range keyboard.Keyboard {
+		for _, button := range row {
+			if button.Text == "功能管理" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("owner private keyboard missing function management")
 	}
 }

@@ -33,7 +33,7 @@ func (s *Services) UserStatus(userID int64) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !s.Cfg.DisableVerification && (verification == nil || !verification.IsHuman) {
+	if !s.Cfg.Snapshot().DisableVerification && (verification == nil || !verification.IsHuman) {
 		return "当前状态：等待完成安全验证。发送消息后按提示完成验证即可。", nil
 	}
 	if user.MessageThreadID > 0 {
@@ -90,7 +90,7 @@ func (s *Services) UserInfo(userID int64) (string, error) {
 		}
 	}
 	verificationStatus := "已关闭"
-	if !s.Cfg.DisableVerification {
+	if !s.Cfg.Snapshot().DisableVerification {
 		verificationStatus = "未验证"
 		verification, verificationErr := s.Store.GetVerificationState(userID)
 		if verificationErr != nil {
@@ -186,10 +186,10 @@ func (s *Services) CloseTopic(ctx context.Context, b *bot.Bot, threadID int, ope
 	if s.Cfg.IsAdmin(user.UserID) {
 		return fmt.Errorf("不能对管理员账号执行会话关闭操作")
 	}
-	if _, err := b.CloseForumTopic(ctx, &bot.CloseForumTopicParams{ChatID: s.Cfg.AdminGroupID, MessageThreadID: threadID}); err != nil {
+	if _, err := b.CloseForumTopic(ctx, &bot.CloseForumTopicParams{ChatID: s.Cfg.Snapshot().AdminGroupID, MessageThreadID: threadID}); err != nil {
 		return err
 	}
-	if err := s.Store.UpsertForumStatus(&model.ForumStatus{ChatID: s.Cfg.AdminGroupID, MessageThreadID: threadID, Status: "closed"}); err != nil {
+	if err := s.Store.UpsertForumStatus(&model.ForumStatus{ChatID: s.Cfg.Snapshot().AdminGroupID, MessageThreadID: threadID, Status: "closed"}); err != nil {
 		return err
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: user.UserID, Text: "客服已关闭本次对话。如需继续联系，请等待管理员重新打开会话。"})
@@ -210,10 +210,10 @@ func (s *Services) OpenTopic(ctx context.Context, b *bot.Bot, threadID int, oper
 	if user.IsBanned {
 		return fmt.Errorf("用户仍处于封禁状态，请先 /unban %d", user.UserID)
 	}
-	if _, err := b.ReopenForumTopic(ctx, &bot.ReopenForumTopicParams{ChatID: s.Cfg.AdminGroupID, MessageThreadID: threadID}); err != nil {
+	if _, err := b.ReopenForumTopic(ctx, &bot.ReopenForumTopicParams{ChatID: s.Cfg.Snapshot().AdminGroupID, MessageThreadID: threadID}); err != nil {
 		return err
 	}
-	if err := s.Store.UpsertForumStatus(&model.ForumStatus{ChatID: s.Cfg.AdminGroupID, MessageThreadID: threadID, Status: "opened"}); err != nil {
+	if err := s.Store.UpsertForumStatus(&model.ForumStatus{ChatID: s.Cfg.Snapshot().AdminGroupID, MessageThreadID: threadID, Status: "opened"}); err != nil {
 		return err
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: user.UserID, Text: "客服已重新打开对话，你现在可以继续发送消息。"})
@@ -248,10 +248,10 @@ func (s *Services) BanUser(ctx context.Context, b *bot.Bot, userID int64, reason
 		return err
 	}
 	if user.MessageThreadID > 0 {
-		if _, closeErr := b.CloseForumTopic(ctx, &bot.CloseForumTopicParams{ChatID: s.Cfg.AdminGroupID, MessageThreadID: user.MessageThreadID}); closeErr != nil {
+		if _, closeErr := b.CloseForumTopic(ctx, &bot.CloseForumTopicParams{ChatID: s.Cfg.Snapshot().AdminGroupID, MessageThreadID: user.MessageThreadID}); closeErr != nil {
 			s.Logger.Warn("ban closed topic failed", "err", closeErr, "user_id", userID, "thread_id", user.MessageThreadID)
 		}
-		if statusErr := s.Store.UpsertForumStatus(&model.ForumStatus{ChatID: s.Cfg.AdminGroupID, MessageThreadID: user.MessageThreadID, Status: "closed"}); statusErr != nil {
+		if statusErr := s.Store.UpsertForumStatus(&model.ForumStatus{ChatID: s.Cfg.Snapshot().AdminGroupID, MessageThreadID: user.MessageThreadID, Status: "closed"}); statusErr != nil {
 			return statusErr
 		}
 	}

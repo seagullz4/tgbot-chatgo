@@ -30,11 +30,11 @@ func (h *Handlers) Help(ctx context.Context, b *bot.Bot, update *models.Update) 
 	if message == nil || message.From == nil {
 		return
 	}
-	if message.Chat.ID == h.Svc.Cfg.AdminGroupID {
+	if message.Chat.ID == h.Svc.Cfg.Snapshot().AdminGroupID {
 		if !h.requireAdmin(ctx, b, message) {
 			return
 		}
-		text := "<b>管理员命令</b>\n/info [用户ID] — 查看用户信息\n/banned — 查看封禁列表\n/close — 关闭当前会话\n/open — 重新打开当前会话\n/ban [原因] — 封禁当前用户（管理员不可封禁）\n/unban [用户ID] — 解除封禁\n/clear — 删除话题并清理会话\n/say 文本 — 快速回复用户\n/broadcast — 回复消息后广播\n\n关闭、重开、封禁、清理和回复必须在对应用户话题内执行。"
+		text := "<b>管理员命令</b>\n/info [用户ID] — 查看用户信息\n/banned — 查看封禁列表\n/close — 关闭当前会话\n/open — 重新打开当前会话\n/ban [原因] — 封禁当前用户（管理员不可封禁）\n/unban [用户ID] — 解除封禁\n/clear — 删除话题并清理会话\n/say 文本 — 快速回复用户\n\n关闭、重开、封禁、清理和回复必须在对应用户话题内执行。"
 		h.sendMessage(ctx, b, &bot.SendMessageParams{ChatID: message.Chat.ID, MessageThreadID: message.MessageThreadID, Text: text, ParseMode: models.ParseModeHTML}, "send admin help")
 		return
 	}
@@ -42,8 +42,12 @@ func (h *Handlers) Help(ctx context.Context, b *bot.Bot, update *models.Update) 
 		return
 	}
 	if h.Svc.Cfg.IsAdmin(message.From.ID) {
-		text := "<b>管理员私聊命令</b>\n/banned — 查看封禁用户列表\n/info &lt;用户ID&gt; — 查询用户详情\n/unban &lt;用户ID&gt; — 解除用户封禁\n/status — 检查管理员身份\n/id — 查看你的 Telegram ID\n\n关闭、重开、封禁、清理、回复和广播等会话操作仅可在管理群执行。管理员账号不会作为普通用户建立会话，也不能被封禁。"
-		h.sendMessage(ctx, b, &bot.SendMessageParams{ChatID: message.Chat.ID, Text: text, ParseMode: models.ParseModeHTML, ReplyMarkup: service.AdminKeyboard()}, "send admin private help")
+		text := "<b>管理员私聊命令</b>\n/banned — 查看封禁用户列表\n/info &lt;用户ID&gt; — 查询用户详情\n/unban &lt;用户ID&gt; — 解除用户封禁\n/status — 检查管理员身份\n/id — 查看你的 Telegram ID"
+		if h.Svc.Cfg.IsOwner(message.From.ID) {
+			text += "\n/function — 打开运维设置\n/reload — 重载 .env\n/logs — 下载日志\n/clearlogs — 清理日志"
+		}
+		text += "\n\n关闭、重开、封禁、清理和回复等会话操作仅可在管理群执行。管理员账号不会作为普通用户建立会话，也不能被封禁。"
+		h.sendMessage(ctx, b, &bot.SendMessageParams{ChatID: message.Chat.ID, Text: text, ParseMode: models.ParseModeHTML, ReplyMarkup: h.privateKeyboard(message.From.ID)}, "send admin private help")
 		return
 	}
 	text := "<b>使用帮助</b>\n直接发送文字、图片、语音或文件即可联系客服。\n/status — 查看会话状态\n/id — 查看你的 Telegram ID\n\n会话只能由管理员关闭或重新打开，用户不能主动结束或取消对话。"
@@ -214,7 +218,7 @@ func (h *Handlers) AdminCallback(ctx context.Context, b *bot.Bot, update *models
 			h.answerAdminAction(ctx, b, query.ID, infoErr, "")
 			return
 		}
-		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: h.Svc.Cfg.AdminGroupID, MessageThreadID: user.MessageThreadID, Text: info, ParseMode: models.ParseModeHTML})
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: h.Svc.Cfg.Snapshot().AdminGroupID, MessageThreadID: user.MessageThreadID, Text: info, ParseMode: models.ParseModeHTML})
 		h.answerAdminAction(ctx, b, query.ID, nil, "已发送用户信息")
 	case "close":
 		if user.MessageThreadID == 0 {
@@ -285,6 +289,9 @@ func (h *Handlers) resolveTargetUserID(message *models.Message, allowArgument bo
 }
 
 func (h *Handlers) privateKeyboard(userID int64) *models.ReplyKeyboardMarkup {
+	if h.Svc.Cfg.IsOwner(userID) {
+		return service.OwnerKeyboard()
+	}
 	if h.Svc.Cfg.IsAdmin(userID) {
 		return service.AdminKeyboard()
 	}
@@ -302,7 +309,7 @@ func (h *Handlers) validAdminAccess(ctx context.Context, b *bot.Bot, message *mo
 	if message == nil || message.From == nil {
 		return false
 	}
-	if message.Chat.ID != h.Svc.Cfg.AdminGroupID && message.Chat.Type != models.ChatTypePrivate {
+	if message.Chat.ID != h.Svc.Cfg.Snapshot().AdminGroupID && message.Chat.Type != models.ChatTypePrivate {
 		return false
 	}
 	return h.requireAdmin(ctx, b, message)
@@ -312,13 +319,13 @@ func (h *Handlers) validAdminMessage(ctx context.Context, b *bot.Bot, message *m
 	if message == nil || message.From == nil {
 		return false
 	}
-	if message.Chat.ID != h.Svc.Cfg.AdminGroupID {
+	if message.Chat.ID != h.Svc.Cfg.Snapshot().AdminGroupID {
 		if message.Chat.Type == models.ChatTypePrivate {
 			if h.Svc.Cfg.IsAdmin(message.From.ID) {
 				h.sendMessage(ctx, b, &bot.SendMessageParams{
 					ChatID:      message.Chat.ID,
 					Text:        "此命令只能在管理群中使用；涉及用户会话时，请进入对应用户话题操作。",
-					ReplyMarkup: service.AdminKeyboard(),
+					ReplyMarkup: h.privateKeyboard(message.From.ID),
 				}, "redirect admin group command")
 			} else {
 				h.sendMessage(ctx, b, &bot.SendMessageParams{

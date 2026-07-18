@@ -1,12 +1,16 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func setRequiredEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("BOT_TOKEN", "123456:test-token")
 	t.Setenv("ADMIN_GROUP_ID", "-1001234567890")
 	t.Setenv("ADMIN_USER_IDS", "123456")
+	t.Setenv("OWNER_USER_IDS", "654321")
 }
 
 func TestLoadRuntimeDefaults(t *testing.T) {
@@ -90,5 +94,56 @@ func TestLoadSupportsLegacyDisableCaptchaVariable(t *testing.T) {
 	}
 	if !cfg.DisableVerification {
 		t.Fatal("legacy DISABLE_CAPTCHA was not applied")
+	}
+}
+func TestConfigRejectsInvalidScalarValues(t *testing.T) {
+	base := map[string]string{
+		"BOT_TOKEN":      "123456:test-token",
+		"ADMIN_GROUP_ID": "-1001234567890",
+		"OWNER_USER_IDS": "654321",
+		"ADMIN_USER_IDS": "123456",
+	}
+	tests := []struct {
+		key   string
+		value string
+	}{
+		{key: "BOT_WORKERS", value: "many"},
+		{key: "USER_FORWARD_ACK", value: "sometimes"},
+		{key: "MESSAGE_INTERVAL", value: "-1"},
+	}
+	for _, test := range tests {
+		t.Run(test.key, func(t *testing.T) {
+			values := make(map[string]string, len(base)+1)
+			for key, value := range base {
+				values[key] = value
+			}
+			values[test.key] = test.value
+			if _, err := configFromValues(values); err == nil || !strings.Contains(err.Error(), test.key) {
+				t.Fatalf("expected %s validation error, got %v", test.key, err)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsMultipleOwners(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("OWNER_USER_IDS", "1,2")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load accepted multiple owners")
+	}
+}
+
+func TestLoadSeparatesOwnerFromOrdinaryAdmins(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("ADMIN_USER_IDS", "123456,654321")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.IsOwner(654321) || !cfg.IsAdmin(654321) {
+		t.Fatal("owner permissions were not preserved")
+	}
+	if _, duplicate := cfg.AdminUserIDs[654321]; duplicate {
+		t.Fatal("owner remained duplicated in ordinary admins")
 	}
 }

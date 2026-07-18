@@ -97,6 +97,7 @@ CREATE TABLE IF NOT EXISTS captcha_state (
 	pending_message_ids TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_message_map_user_msg ON message_map(user_chat_message_id);
+CREATE INDEX IF NOT EXISTS idx_message_map_user_message ON message_map(user_id, user_chat_message_id);
 CREATE INDEX IF NOT EXISTS idx_message_map_group_msg ON message_map(group_chat_message_id);
 CREATE INDEX IF NOT EXISTS idx_message_map_user ON message_map(user_id);
 CREATE INDEX IF NOT EXISTS idx_media_group ON media_group_message(chat_id, media_group_id);
@@ -162,6 +163,26 @@ func (s *SQLite) UpdateUserThreadID(userID int64, threadID int) error {
 	return err
 }
 
+func (s *SQLite) ResetConversationRouting() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		"UPDATE user SET message_thread_id = 0",
+		"DELETE FROM formn_status",
+		"DELETE FROM message_map",
+		"DELETE FROM media_group_message",
+	}
+	for _, statement := range statements {
+		if _, err := tx.Exec(statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *SQLite) SetUserBanned(userID int64, banned bool, reason string) error {
 	_, err := s.db.Exec(
 		`UPDATE user SET is_banned = ?, ban_reason = ?, updated_at = ? WHERE user_id = ?`,
@@ -225,10 +246,10 @@ func (s *SQLite) SaveMessageMap(m *model.MessageMap) error {
 	return nil
 }
 
-func (s *SQLite) GetByUserMessageID(userMessageID int) (*model.MessageMap, error) {
+func (s *SQLite) GetByUserMessageID(userID int64, userMessageID int) (*model.MessageMap, error) {
 	row := s.db.QueryRow(
-		`SELECT id, user_chat_message_id, group_chat_message_id, user_id, message_text FROM message_map WHERE user_chat_message_id = ?`,
-		userMessageID,
+		`SELECT id, user_chat_message_id, group_chat_message_id, user_id, message_text FROM message_map WHERE user_id = ? AND user_chat_message_id = ?`,
+		userID, userMessageID,
 	)
 	return scanMessageMap(row)
 }
@@ -241,8 +262,8 @@ func (s *SQLite) GetByGroupMessageID(groupMessageID int) (*model.MessageMap, err
 	return scanMessageMap(row)
 }
 
-func (s *SQLite) UpdateMessageTextByUserMessageID(userMessageID int, text string) error {
-	_, err := s.db.Exec(`UPDATE message_map SET message_text = ? WHERE user_chat_message_id = ?`, text, userMessageID)
+func (s *SQLite) UpdateMessageTextByUserMessageID(userID int64, userMessageID int, text string) error {
+	_, err := s.db.Exec(`UPDATE message_map SET message_text = ? WHERE user_id = ? AND user_chat_message_id = ?`, text, userID, userMessageID)
 	return err
 }
 

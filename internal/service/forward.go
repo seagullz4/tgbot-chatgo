@@ -6,7 +6,6 @@ import (
 	"html"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -20,15 +19,15 @@ import (
 
 // Services groups business logic used by handlers.
 type Services struct {
-	Cfg               *config.Config
+	Cfg               config.Provider
 	Store             store.Store
 	Jobs              *job.Scheduler
 	Logger            *slog.Logger
-	topicLocks        sync.Map
-	verificationLocks sync.Map
+	topicLocks        keyedLockPool
+	verificationLocks keyedLockPool
 }
 
-func New(cfg *config.Config, st store.Store, jobs *job.Scheduler, logger *slog.Logger) *Services {
+func New(cfg config.Provider, st store.Store, jobs *job.Scheduler, logger *slog.Logger) *Services {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -51,10 +50,8 @@ func (s *Services) EnsureTopic(ctx context.Context, b *bot.Bot, user *models.Use
 		return dbUser.MessageThreadID, nil
 	}
 
-	lockValue, _ := s.topicLocks.LoadOrStore(user.ID, &sync.Mutex{})
-	topicLock := lockValue.(*sync.Mutex)
-	topicLock.Lock()
-	defer topicLock.Unlock()
+	unlock := s.topicLocks.Lock(user.ID)
+	defer unlock()
 
 	latestUser, err := s.Store.GetUserByTelegramID(user.ID)
 	if err != nil {
@@ -79,7 +76,7 @@ func (s *Services) EnsureTopic(ctx context.Context, b *bot.Bot, user *models.Use
 	}
 
 	topic, err := b.CreateForumTopic(ctx, &bot.CreateForumTopicParams{
-		ChatID: s.Cfg.AdminGroupID,
+		ChatID: s.Cfg.Snapshot().AdminGroupID,
 		Name:   topicName,
 	})
 	if err != nil {
@@ -92,14 +89,14 @@ func (s *Services) EnsureTopic(ctx context.Context, b *bot.Bot, user *models.Use
 
 	mention := mentionHTML(user.ID, displayName(user))
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:          s.Cfg.AdminGroupID,
+		ChatID:          s.Cfg.Snapshot().AdminGroupID,
 		MessageThreadID: topic.MessageThreadID,
 		Text:            fmt.Sprintf("新的用户 %s 开始了一个新的会话。", mention),
 		ParseMode:       models.ParseModeHTML,
 	})
 	_ = s.SendContactCard(ctx, b, topic.MessageThreadID, user)
 	_ = s.Store.UpsertForumStatus(&model.ForumStatus{
-		ChatID:          s.Cfg.AdminGroupID,
+		ChatID:          s.Cfg.Snapshot().AdminGroupID,
 		MessageThreadID: topic.MessageThreadID,
 		Status:          "opened",
 	})
@@ -129,7 +126,7 @@ func (s *Services) SendContactCard(ctx context.Context, b *bot.Bot, threadID int
 		sizes := photos.Photos[0]
 		fileID := sizes[len(sizes)-1].FileID
 		_, err = b.SendPhoto(ctx, &bot.SendPhotoParams{
-			ChatID:          s.Cfg.AdminGroupID,
+			ChatID:          s.Cfg.Snapshot().AdminGroupID,
 			MessageThreadID: threadID,
 			Photo:           &models.InputFileString{Data: fileID},
 			Caption:         caption,
@@ -140,7 +137,7 @@ func (s *Services) SendContactCard(ctx context.Context, b *bot.Bot, threadID int
 	}
 
 	_, err = b.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID:          s.Cfg.AdminGroupID,
+		ChatID:          s.Cfg.Snapshot().AdminGroupID,
 		MessageThreadID: threadID,
 		Text:            caption,
 		ParseMode:       models.ParseModeHTML,
@@ -181,13 +178,13 @@ func (s *Services) ForwardUserToAdmin(ctx context.Context, b *bot.Bot, msg *mode
 	}
 
 	params := &bot.CopyMessageParams{
-		ChatID:          s.Cfg.AdminGroupID,
+		ChatID:          s.Cfg.Snapshot().AdminGroupID,
 		FromChatID:      msg.Chat.ID,
 		MessageID:       msg.ID,
 		MessageThreadID: threadID,
 	}
 	if msg.ReplyToMessage != nil {
-		if mapping, _ := s.Store.GetByUserMessageID(msg.ReplyToMessage.ID); mapping != nil {
+		if mapping, _ := s.Store.GetByUserMessageID(user.ID, msg.ReplyToMessage.ID); mapping != nil {
 			params.ReplyParameters = &models.ReplyParameters{MessageID: mapping.GroupChatMessageID}
 		}
 	}
@@ -195,7 +192,7 @@ func (s *Services) ForwardUserToAdmin(ctx context.Context, b *bot.Bot, msg *mode
 	sent, err := b.CopyMessage(ctx, params)
 	if err != nil {
 		s.Logger.Warn("copy user message failed", "err", err, "user_id", user.ID, "thread_id", threadID)
-		if s.Cfg.DeleteTopicAsForeverBan {
+		if s.Cfg.Snapshot().DeleteTopicAsForeverBan {
 			_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "消息未能转达：客服话题已被删除，当前不能自动重新建立会话。"})
 			return false, nil
 		}
@@ -323,7 +320,7 @@ func (s *Services) ForwardAdminToUser(ctx context.Context, b *bot.Bot, msg *mode
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:          msg.Chat.ID,
 			MessageThreadID: msg.MessageThreadID,
-			Text:            fmt.Sprintf("发送失败: %v", err),
+			Text:            adminForwardFailureMessage(err),
 			ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
 		})
 		return err
@@ -348,7 +345,7 @@ func (s *Services) bufferMediaGroup(ctx context.Context, b *bot.Bot, msg *models
 
 	fromChatID := msg.Chat.ID
 	mediaGroupID := msg.MediaGroupID
-	targetID := s.Cfg.AdminGroupID
+	targetID := s.Cfg.Snapshot().AdminGroupID
 	if dir == "a2u" {
 		targetID = userID
 	}
@@ -416,7 +413,7 @@ func (s *Services) flushMediaGroup(ctx context.Context, b *bot.Bot, fromChatID, 
 			})
 		}
 	}
-	if dir == "u2a" && s.Cfg.UserForwardAck {
+	if dir == "u2a" && s.Cfg.Snapshot().UserForwardAck {
 		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: userID, Text: "✓ 已转达客服"})
 	}
 	if err := s.Store.DeleteMediaGroupMessages(fromChatID, mediaGroupID); err != nil {
@@ -439,16 +436,16 @@ func (s *Services) EditMirroredMessage(ctx context.Context, b *bot.Bot, msg *mod
 
 	switch msg.Chat.Type {
 	case models.ChatTypePrivate:
-		mapping, err = s.Store.GetByUserMessageID(msg.ID)
+		mapping, err = s.Store.GetByUserMessageID(msg.Chat.ID, msg.ID)
 		if mapping != nil {
-			targetChatID = s.Cfg.AdminGroupID
+			targetChatID = s.Cfg.Snapshot().AdminGroupID
 			targetMessageID = mapping.GroupChatMessageID
 			updateStoredText = func(text string) error {
-				return s.Store.UpdateMessageTextByUserMessageID(msg.ID, text)
+				return s.Store.UpdateMessageTextByUserMessageID(msg.Chat.ID, msg.ID, text)
 			}
 		}
 	case models.ChatTypeSupergroup, models.ChatTypeGroup:
-		if msg.Chat.ID != s.Cfg.AdminGroupID {
+		if msg.Chat.ID != s.Cfg.Snapshot().AdminGroupID {
 			return nil
 		}
 		mapping, err = s.Store.GetByGroupMessageID(msg.ID)
@@ -495,6 +492,17 @@ func (s *Services) EditMirroredMessage(ctx context.Context, b *bot.Bot, msg *mod
 	return nil
 }
 
+func adminForwardFailureMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	normalized := strings.ToLower(err.Error())
+	if strings.Contains(normalized, "message to be replied not found") || strings.Contains(normalized, "reply message not found") {
+		return "当前回复引用的信息被对方删除"
+	}
+	return fmt.Sprintf("发送失败: %v", err)
+}
+
 func messageContent(msg *models.Message) string {
 	if msg.Text != "" {
 		return msg.Text
@@ -531,7 +539,7 @@ func (s *Services) ClearTopic(ctx context.Context, b *bot.Bot, adminChatID int64
 	}
 
 	var messageIDs []int
-	if s.Cfg.DeleteUserMessageOnClear {
+	if s.Cfg.Snapshot().DeleteUserMessageOnClear {
 		mappings, listErr := s.Store.ListMessageMapsByUser(user.UserID)
 		if listErr != nil {
 			return listErr
@@ -552,7 +560,7 @@ func (s *Services) ClearTopic(ctx context.Context, b *bot.Bot, adminChatID int64
 	if err := s.Store.DeleteForumStatus(threadID); err != nil {
 		return err
 	}
-	if s.Cfg.DeleteUserMessageOnClear {
+	if s.Cfg.Snapshot().DeleteUserMessageOnClear {
 		for index := 0; index < len(messageIDs); index += 100 {
 			end := index + 100
 			if end > len(messageIDs) {
@@ -566,40 +574,6 @@ func (s *Services) ClearTopic(ctx context.Context, b *bot.Bot, adminChatID int64
 	}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: user.UserID, Text: "客服已结束并清理本次会话。"})
 	return nil
-}
-
-// Broadcast copies a replied message to all known, unbanned, non-admin users.
-func (s *Services) Broadcast(ctx context.Context, b *bot.Bot, fromChatID int64, messageID int, progress func(done, total, success, failed int)) (success, failed int) {
-	users, err := s.Store.ListUsers()
-	if err != nil {
-		return 0, 0
-	}
-	targets := make([]*model.User, 0, len(users))
-	for _, user := range users {
-		if user != nil && !user.IsBanned && !s.Cfg.IsAdmin(user.UserID) {
-			targets = append(targets, user)
-		}
-	}
-	total := len(targets)
-	for index, user := range targets {
-		if _, err := b.CopyMessage(ctx, &bot.CopyMessageParams{ChatID: user.UserID, FromChatID: fromChatID, MessageID: messageID}); err != nil {
-			failed++
-		} else {
-			success++
-		}
-		done := index + 1
-		if progress != nil && (done%25 == 0 || done == total) {
-			progress(done, total, success, failed)
-		}
-		if done < total {
-			select {
-			case <-ctx.Done():
-				return success, failed
-			case <-time.After(50 * time.Millisecond):
-			}
-		}
-	}
-	return success, failed
 }
 
 func mentionHTML(userID int64, name string) string {

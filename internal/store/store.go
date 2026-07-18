@@ -15,12 +15,13 @@ type Store interface {
 	SetUserBanned(userID int64, banned bool, reason string) error
 	ListUsers() ([]*model.User, error)
 	ListBannedUsers() ([]*model.User, error)
+	ResetConversationRouting() error
 
 	// message map
 	SaveMessageMap(m *model.MessageMap) error
-	GetByUserMessageID(userMessageID int) (*model.MessageMap, error)
+	GetByUserMessageID(userID int64, userMessageID int) (*model.MessageMap, error)
 	GetByGroupMessageID(groupMessageID int) (*model.MessageMap, error)
-	UpdateMessageTextByUserMessageID(userMessageID int, text string) error
+	UpdateMessageTextByUserMessageID(userID int64, userMessageID int, text string) error
 	UpdateMessageTextByGroupMessageID(groupMessageID int, text string) error
 	ListMessageMapsByUser(userID int64) ([]*model.MessageMap, error)
 	DeleteMessageMapsByUser(userID int64) error

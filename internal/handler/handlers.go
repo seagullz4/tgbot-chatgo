@@ -9,14 +9,14 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"telegram-interactive-bot/go-bot/internal/command"
 	"telegram-interactive-bot/go-bot/internal/service"
 )
 
 // Handlers binds Telegram updates to services.
 const (
-	commandStart     = "start"
-	commandClear     = "clear"
-	commandBroadcast = "broadcast"
+	commandStart = "start"
+	commandClear = "clear"
 )
 
 type Handlers struct {
@@ -32,24 +32,26 @@ func New(svc *service.Services, logger *slog.Logger) *Handlers {
 }
 
 // Register wires all go-telegram/bot handlers.
-func (h *Handlers) Register(b *bot.Bot) {
+func (h *Handlers) Register(b *bot.Bot, botUsername string) {
 	commands := map[string]bot.HandlerFunc{
-		commandStart:     h.Start,
-		commandHelp:      h.Help,
-		commandStatus:    h.Status,
-		commandID:        h.ID,
-		commandInfo:      h.Info,
-		commandClose:     h.Close,
-		commandOpen:      h.Open,
-		commandBan:       h.Ban,
-		commandUnban:     h.Unban,
-		commandBanned:    h.Banned,
-		commandClear:     h.Clear,
-		commandBroadcast: h.Broadcast,
-		commandSay:       h.Say,
+		commandStart:  h.Start,
+		commandHelp:   h.Help,
+		commandStatus: h.Status,
+		commandID:     h.ID,
+		commandInfo:   h.Info,
+		commandClose:  h.Close,
+		commandOpen:   h.Open,
+		commandBan:    h.Ban,
+		commandUnban:  h.Unban,
+		commandBanned: h.Banned,
+		commandClear:  h.Clear,
+		commandSay:    h.Say,
 	}
-	for command, handler := range commands {
-		b.RegisterHandler(bot.HandlerTypeMessageText, command, bot.MatchTypeCommandStartOnly, handler)
+	for commandName, handler := range commands {
+		registeredCommand := commandName
+		b.RegisterHandlerMatchFunc(func(update *models.Update) bool {
+			return command.Matches(update, registeredCommand, botUsername)
+		}, handler)
 	}
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "math_", bot.MatchTypePrefix, h.VerificationCallback)
 	b.RegisterHandler(bot.HandlerTypeCallbackQueryData, "adm:", bot.MatchTypePrefix, h.AdminCallback)
@@ -89,7 +91,7 @@ func (h *Handlers) Default(ctx context.Context, b *bot.Bot, update *models.Updat
 	case models.ChatTypePrivate:
 		h.userToAdmin(ctx, b, msg)
 	case models.ChatTypeSupergroup, models.ChatTypeGroup:
-		if msg.Chat.ID == h.Svc.Cfg.AdminGroupID && (hasForwardableContent(msg) || isForumLifecycleEvent(msg)) {
+		if msg.Chat.ID == h.Svc.Cfg.Snapshot().AdminGroupID && (hasForwardableContent(msg) || isForumLifecycleEvent(msg)) {
 			h.adminToUser(ctx, b, msg)
 		}
 	default:
@@ -109,7 +111,7 @@ func (h *Handlers) Start(ctx context.Context, b *bot.Bot, update *models.Update)
 	user := msg.From
 
 	if h.Svc.Cfg.IsAdmin(user.ID) {
-		chat, err := b.GetChat(ctx, &bot.GetChatParams{ChatID: h.Svc.Cfg.AdminGroupID})
+		chat, err := b.GetChat(ctx, &bot.GetChatParams{ChatID: h.Svc.Cfg.Snapshot().AdminGroupID})
 		if err != nil {
 			h.Logger.Error("admin group check failed", "err", err)
 			h.sendMessage(ctx, b, &bot.SendMessageParams{
@@ -118,18 +120,18 @@ func (h *Handlers) Start(ctx context.Context, b *bot.Bot, update *models.Update)
 					"⚠️ 管理群组配置检查失败。请确认机器人已加入管理群并拥有管理话题权限。\n错误细节：%v",
 					err,
 				),
-				ReplyMarkup: service.AdminKeyboard(),
+				ReplyMarkup: h.privateKeyboard(msg.From.ID),
 			}, "send admin configuration error")
 			return
 		}
 		h.sendMessage(ctx, b, &bot.SendMessageParams{
 			ChatID: msg.Chat.ID,
 			Text: fmt.Sprintf(
-				"你好，管理员 %s（<code>%d</code>）。\n\n<b>%s 管理面板</b>\n私聊可用：/help、/status、/id、/banned、/info &lt;用户ID&gt;、/unban &lt;用户ID&gt;。\n关闭、重开、封禁、清理、回复和广播等操作请在管理群 <b>%s</b> 的对应用户话题内执行。\n\n管理员账号不会进入普通用户会话，也不能被封禁。",
-				escape(display(user)), user.ID, escape(h.Svc.Cfg.AppName), escape(chat.Title),
+				"你好，管理员 %s（<code>%d</code>）。\n\n<b>%s 管理面板</b>\n私聊可用：/help、/status、/id、/banned、/info &lt;用户ID&gt;、/unban &lt;用户ID&gt;。\n关闭、重开、封禁、清理和回复等操作请在管理群 <b>%s</b> 的对应用户话题内执行。\n\n管理员账号不会进入普通用户会话，也不能被封禁。",
+				escape(display(user)), user.ID, escape(h.Svc.Cfg.Snapshot().AppName), escape(chat.Title),
 			),
 			ParseMode:   models.ParseModeHTML,
-			ReplyMarkup: service.AdminKeyboard(),
+			ReplyMarkup: h.privateKeyboard(msg.From.ID),
 		}, "send admin welcome")
 		return
 	}
@@ -141,7 +143,7 @@ func (h *Handlers) Start(ctx context.Context, b *bot.Bot, update *models.Update)
 		ChatID: msg.Chat.ID,
 		Text: fmt.Sprintf(
 			"<a href=\"tg://user?id=%d\">%s</a> 同学：\n\n%s",
-			user.ID, escape(display(user)), h.Svc.Cfg.WelcomeMessage,
+			user.ID, escape(display(user)), h.Svc.Cfg.Snapshot().WelcomeMessage,
 		),
 		ParseMode:   models.ParseModeHTML,
 		ReplyMarkup: service.UserKeyboard(),
@@ -169,35 +171,6 @@ func (h *Handlers) Clear(ctx context.Context, b *bot.Bot, update *models.Update)
 	}
 }
 
-func (h *Handlers) Broadcast(ctx context.Context, b *bot.Bot, update *models.Update) {
-	message := update.Message
-	if !h.validAdminMessage(ctx, b, message) {
-		return
-	}
-	if message.ReplyToMessage == nil {
-		h.adminReply(ctx, b, message, "请先回复一条要广播的消息，再使用 /broadcast")
-		return
-	}
-	users, err := h.Svc.Store.ListUsers()
-	if err != nil {
-		h.adminReply(ctx, b, message, "读取用户失败："+err.Error())
-		return
-	}
-	total := 0
-	for _, user := range users {
-		if user != nil && !user.IsBanned && !h.Svc.Cfg.IsAdmin(user.UserID) {
-			total++
-		}
-	}
-	h.adminReply(ctx, b, message, fmt.Sprintf("开始广播，共 %d 位可接收用户…", total))
-	success, failed := h.Svc.Broadcast(ctx, b, message.Chat.ID, message.ReplyToMessage.ID, func(done, total, success, failed int) {
-		if done < total {
-			h.adminReply(ctx, b, message, fmt.Sprintf("广播进度 %d/%d，成功 %d，失败 %d", done, total, success, failed))
-		}
-	})
-	h.adminReply(ctx, b, message, fmt.Sprintf("✅ 广播完成：成功 %d，失败 %d", success, failed))
-}
-
 func (h *Handlers) userToAdmin(ctx context.Context, b *bot.Bot, msg *models.Message) {
 	if msg.From == nil {
 		return
@@ -206,7 +179,7 @@ func (h *Handlers) userToAdmin(ctx context.Context, b *bot.Bot, msg *models.Mess
 		h.sendMessage(ctx, b, &bot.SendMessageParams{
 			ChatID:      msg.Chat.ID,
 			Text:        "这是管理员私聊面板。可使用 /banned 查看封禁列表，使用 /info <用户ID> 查询，使用 /unban <用户ID> 解封；会话管理请前往管理群话题。",
-			ReplyMarkup: service.AdminKeyboard(),
+			ReplyMarkup: h.privateKeyboard(msg.From.ID),
 		}, "admin private non-command")
 		return
 	}
@@ -250,7 +223,7 @@ func (h *Handlers) userToAdmin(ctx context.Context, b *bot.Bot, msg *models.Mess
 	if !delivered {
 		return
 	}
-	if h.Svc.Cfg.UserForwardAck && msg.MediaGroupID == "" {
+	if h.Svc.Cfg.Snapshot().UserForwardAck && msg.MediaGroupID == "" {
 		h.sendMessage(ctx, b, &bot.SendMessageParams{ChatID: msg.Chat.ID, Text: "✓ 已转达客服"}, "ack user forward")
 	}
 	h.Logger.Info("forward u2a completed", "chat_id", msg.Chat.ID, "message_id", msg.ID)

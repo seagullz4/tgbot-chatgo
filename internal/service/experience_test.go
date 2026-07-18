@@ -165,7 +165,7 @@ func TestUserStatusReflectsBanAndClosedConversation(t *testing.T) {
 func TestVerificationReplayDoesNotAcknowledgeClosedConversation(t *testing.T) {
 	services, messageStore := newClosedConversationService(t, "verification-closed.sqlite3")
 	defer messageStore.Close()
-	services.Cfg.DisableVerification = false
+	services.Cfg.(*config.Config).DisableVerification = false
 	if err := messageStore.UpsertVerificationState(&model.VerificationState{
 		UserID:            42,
 		Answer:            "6",
@@ -232,38 +232,6 @@ func TestMediaGroupFlushDoesNotAcknowledgeAfterConversationCloses(t *testing.T) 
 	}
 	if len(buffered) != 0 {
 		t.Fatalf("closed media group buffer was not cleared: %v", buffered)
-	}
-}
-
-func TestBroadcastSkipsConfiguredAdminsAndBannedUsers(t *testing.T) {
-	messageStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "broadcast.sqlite3"), 4)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer messageStore.Close()
-	for _, user := range []*model.User{
-		{UserID: 1, FirstName: "LegacyAdmin"},
-		{UserID: 42, FirstName: "ActiveUser"},
-		{UserID: 43, FirstName: "BannedUser"},
-	} {
-		if _, err := messageStore.EnsureUser(user); err != nil {
-			t.Fatalf("ensure user %d: %v", user.UserID, err)
-		}
-	}
-	if err := messageStore.SetUserBanned(43, true, "spam"); err != nil {
-		t.Fatalf("ban user: %v", err)
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	services := New(&config.Config{AdminUserIDs: map[int64]struct{}{1: {}}}, messageStore, job.New(), logger)
-	client := &experienceHTTPClient{}
-	telegramBot := newExperienceBot(t, client)
-
-	success, failed := services.Broadcast(context.Background(), telegramBot, -100, 5, nil)
-	if success != 1 || failed != 0 {
-		t.Fatalf("broadcast result success=%d failed=%d", success, failed)
-	}
-	if len(client.chatIDs) != 1 || client.chatIDs[0] != "42" {
-		t.Fatalf("broadcast targets = %q, want only user 42", client.chatIDs)
 	}
 }
 
@@ -383,7 +351,7 @@ func TestCheckHumanSendsArithmeticQuestionWithoutImageDependency(t *testing.T) {
 func TestCorrectMathAnswerContinuesPendingConversation(t *testing.T) {
 	services, messageStore := newClosedConversationService(t, "verification-open.sqlite3")
 	defer messageStore.Close()
-	services.Cfg.DisableVerification = false
+	services.Cfg.(*config.Config).DisableVerification = false
 	if err := messageStore.UpsertForumStatus(&model.ForumStatus{ChatID: -100, MessageThreadID: 100, Status: "opened"}); err != nil {
 		t.Fatalf("open conversation: %v", err)
 	}
@@ -431,7 +399,7 @@ func TestCorrectMathAnswerContinuesPendingConversation(t *testing.T) {
 func TestWrongMathAnswerDoesNotContinueConversation(t *testing.T) {
 	services, messageStore := newClosedConversationService(t, "verification-wrong.sqlite3")
 	defer messageStore.Close()
-	services.Cfg.DisableVerification = false
+	services.Cfg.(*config.Config).DisableVerification = false
 	if err := messageStore.UpsertForumStatus(&model.ForumStatus{ChatID: -100, MessageThreadID: 100, Status: "opened"}); err != nil {
 		t.Fatalf("open conversation: %v", err)
 	}

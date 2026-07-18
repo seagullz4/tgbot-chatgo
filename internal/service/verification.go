@@ -6,7 +6,6 @@ import (
 	"math/rand/v2"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-telegram/bot"
@@ -30,10 +29,7 @@ type arithmeticChallenge struct {
 }
 
 func (s *Services) lockVerification(userID int64) func() {
-	value, _ := s.verificationLocks.LoadOrStore(userID, &sync.Mutex{})
-	mutex := value.(*sync.Mutex)
-	mutex.Lock()
-	return mutex.Unlock
+	return s.verificationLocks.Lock(userID)
 }
 
 func appendPendingMessage(raw string, messageID int) string {
@@ -128,7 +124,7 @@ func randomInt(minimum, maximum int) int {
 
 // CheckHuman enforces arithmetic verification before private messages are forwarded.
 func (s *Services) CheckHuman(ctx context.Context, b *bot.Bot, msg *models.Message) (bool, error) {
-	if s.Cfg.DisableVerification {
+	if s.Cfg.Snapshot().DisableVerification {
 		return true, nil
 	}
 	user := msg.From
@@ -315,7 +311,7 @@ func deleteCallbackMessage(ctx context.Context, b *bot.Bot, query *models.Callba
 
 // CheckRateLimit returns false if the user is messaging too fast.
 func (s *Services) CheckRateLimit(ctx context.Context, b *bot.Bot, msg *models.Message) (bool, error) {
-	if s.Cfg.MessageInterval <= 0 {
+	if s.Cfg.Snapshot().MessageInterval <= 0 {
 		return true, nil
 	}
 	user := msg.From
@@ -329,7 +325,7 @@ func (s *Services) CheckRateLimit(ctx context.Context, b *bot.Bot, msg *models.M
 	if state == nil {
 		state = &model.VerificationState{UserID: user.ID}
 	}
-	interval := time.Duration(s.Cfg.MessageInterval) * time.Second
+	interval := time.Duration(s.Cfg.Snapshot().MessageInterval) * time.Second
 	elapsed := time.Since(state.LastMsgAt)
 	if !state.LastMsgAt.IsZero() && elapsed < interval {
 		remaining := interval - elapsed
