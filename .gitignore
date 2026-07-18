@@ -1,0 +1,9 @@
+bin/
+data/*.sqlite3
+data/*.sqlite3-*
+.env
+.env.bak
+.env-*.tmp
+logs/
+*.log
+*.exe
