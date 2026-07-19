@@ -21,6 +21,9 @@ LEGACY_BINARY_PATH="${INSTALL_DIR}/go-bot"
 RELEASE_ARCH=""
 BINARY_ASSET=""
 INSTALLED_BINARY_PATH=""
+RESOLVED_ASSET_NAME=""
+DOWNLOAD_URL=""
+RESOLVED_VERSION=""
 TEMP_DIR=""
 INPUT_DEVICE="${INPUT_DEVICE:-/dev/tty}"
 
@@ -105,17 +108,107 @@ detect_architecture() {
       fatal "暂不支持系统架构：${machine}。当前发布仅提供 amd64 和 arm64。"
       ;;
   esac
-  BINARY_ASSET="go-bot-linux-${RELEASE_ARCH}"
-  INSTALLED_BINARY_PATH="${INSTALL_DIR}/${BINARY_ASSET}"
+  refresh_binary_paths
   if [[ "$mode" != "quiet" ]]; then
     info "检测到系统架构：${machine}，将使用 ${RELEASE_ARCH} 发布包。"
   fi
 }
 
+refresh_binary_paths() {
+  local candidate
+  BINARY_ASSET=""
+  INSTALLED_BINARY_PATH=""
+
+  if [[ -d "$INSTALL_DIR" ]]; then
+    while IFS= read -r candidate; do
+      [[ -n "$candidate" ]] || continue
+      BINARY_ASSET="$(basename -- "$candidate")"
+      INSTALLED_BINARY_PATH="$candidate"
+      return
+    done < <(find "$INSTALL_DIR" -maxdepth 1 -type f \( \
+      -iname "go-bot-linux-${RELEASE_ARCH}" \
+      -o -iname "go-bot-${RELEASE_ARCH}" \
+    \) -print 2>/dev/null | sort)
+  fi
+
+  BINARY_ASSET="go-bot-linux-${RELEASE_ARCH}"
+  INSTALLED_BINARY_PATH="${INSTALL_DIR}/${BINARY_ASSET}"
+}
+
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+is_matching_release_zip() {
+  local name_lower arch_lower expected
+  name_lower="$(to_lower "$1")"
+  arch_lower="$(to_lower "$2")"
+  expected="go-bot-linux-${arch_lower}.zip"
+  [[ "$name_lower" == "$expected" ]]
+}
+
+extract_download_urls() {
+  printf '%s' "$1" | tr '}' '\n' | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+select_asset_from_api() {
+  local api_response="$1" url name
+  DOWNLOAD_URL=""
+  RESOLVED_ASSET_NAME=""
+  while IFS= read -r url; do
+    [[ -n "$url" ]] || continue
+    name="${url##*/}"
+    if is_matching_release_zip "$name" "$RELEASE_ARCH"; then
+      DOWNLOAD_URL="$url"
+      RESOLVED_ASSET_NAME="$name"
+      return 0
+    fi
+  done < <(extract_download_urls "$api_response")
+  return 1
+}
+
+probe_download_url() {
+  local url="$1"
+  curl -fsI --retry 2 --connect-timeout 8 \
+    -H 'User-Agent: tgbot-chatgo-installer' \
+    "$url" >/dev/null 2>&1
+}
+
+resolve_release_fallback() {
+  local requested_version="$1" latest_url candidate_name
+  warn "GitHub API 获取失败，将通过发布页和资产探测确定下载链接。"
+  if [[ "$requested_version" == "latest" ]]; then
+    latest_url="$(curl -fsSL --retry 3 --connect-timeout 10 -o /dev/null -w '%{url_effective}' \
+      "${GITHUB_REPO_URL}/releases/latest")"
+    RESOLVED_VERSION="${latest_url##*/}"
+  else
+    RESOLVED_VERSION="$requested_version"
+  fi
+
+  [[ -n "$RESOLVED_VERSION" && "$RESOLVED_VERSION" != "latest" ]] \
+    || fatal "无法获取最新版本，请检查网络或通过 VERSION=vX.Y.Z 指定版本。"
+
+  for candidate_name in \
+    "go-bot-Linux-${RELEASE_ARCH}.zip" \
+    "go-bot-linux-${RELEASE_ARCH}.zip" \
+    "go-bot-${RELEASE_ARCH}.zip"
+  do
+    DOWNLOAD_URL="${GITHUB_REPO_URL}/releases/download/${RESOLVED_VERSION}/${candidate_name}"
+    if probe_download_url "$DOWNLOAD_URL"; then
+      RESOLVED_ASSET_NAME="$candidate_name"
+      return
+    fi
+  done
+
+  fatal "${RESOLVED_VERSION} 没有适用于 ${RELEASE_ARCH} 的发布资产（已尝试 Linux/linux 等命名）。"
+}
+
 resolve_release() {
-  local api_endpoint api_response latest_url asset_name requested_version
-  asset_name="go-bot-linux-${RELEASE_ARCH}.zip"
+  local api_endpoint api_response requested_version
   requested_version="$RELEASE_REQUEST"
+  DOWNLOAD_URL=""
+  RESOLVED_ASSET_NAME=""
+  RESOLVED_VERSION=""
 
   if [[ "$requested_version" == "latest" ]]; then
     api_endpoint="${GITHUB_API_URL}/releases/latest"
@@ -131,46 +224,46 @@ resolve_release() {
 
   if [[ -n "$api_response" ]]; then
     RESOLVED_VERSION="$(printf '%s' "$api_response" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-    DOWNLOAD_URL="$(printf '%s' "$api_response" | sed -n "s#.*\"browser_download_url\"[[:space:]]*:[[:space:]]*\"\([^\"]*/${asset_name}\)\".*#\1#p" | head -n 1)"
-
     [[ -n "$RESOLVED_VERSION" ]] || fatal "GitHub Release 数据中没有版本号。"
-    [[ -n "$DOWNLOAD_URL" ]] || fatal "${RESOLVED_VERSION} 没有适用于 ${RELEASE_ARCH} 的发布资产：${asset_name}"
-    info "已匹配发布版本：${RESOLVED_VERSION}"
-    info "已匹配下载资产：${asset_name}"
-    return
+    if select_asset_from_api "$api_response"; then
+      info "已匹配发布版本：${RESOLVED_VERSION}"
+      info "已智能识别下载资产：${RESOLVED_ASSET_NAME}"
+      return
+    fi
+    fatal "${RESOLVED_VERSION} 没有适用于 ${RELEASE_ARCH} 的发布资产。请检查 GitHub Release 是否包含 go-bot-Linux-${RELEASE_ARCH}.zip 或 go-bot-linux-${RELEASE_ARCH}.zip。"
   fi
 
-  warn "GitHub API 获取失败，将通过发布页确定版本并使用标准资产命名规则。"
-  if [[ "$requested_version" == "latest" ]]; then
-    latest_url="$(curl -fsSL --retry 3 --connect-timeout 10 -o /dev/null -w '%{url_effective}' \
-      "${GITHUB_REPO_URL}/releases/latest")"
-    RESOLVED_VERSION="${latest_url##*/}"
-  else
-    RESOLVED_VERSION="$requested_version"
-  fi
-
-  [[ -n "$RESOLVED_VERSION" && "$RESOLVED_VERSION" != "latest" ]] \
-    || fatal "无法获取最新版本，请检查网络或通过 VERSION=vX.Y.Z 指定版本。"
-  DOWNLOAD_URL="${GITHUB_REPO_URL}/releases/download/${RESOLVED_VERSION}/${asset_name}"
+  resolve_release_fallback "$requested_version"
+  info "已匹配发布版本：${RESOLVED_VERSION}"
+  info "已智能识别下载资产：${RESOLVED_ASSET_NAME}"
 }
 
 download_release() {
-  local asset_name archive_file extracted_binary extracted_env_example
-  asset_name="go-bot-linux-${RELEASE_ARCH}.zip"
-  archive_file="${TEMP_DIR}/${asset_name}"
+  local archive_file extracted_binary extracted_env_example
+  [[ -n "$DOWNLOAD_URL" && -n "$RESOLVED_ASSET_NAME" ]] \
+    || fatal "尚未解析到可下载的发布资产。"
 
-  info "正在下载 ${RESOLVED_VERSION}：${asset_name}"
+  archive_file="${TEMP_DIR}/${RESOLVED_ASSET_NAME}"
+  info "正在下载 ${RESOLVED_VERSION}：${RESOLVED_ASSET_NAME}"
   curl -fL --retry 3 --retry-delay 2 --connect-timeout 15 \
     --progress-bar "$DOWNLOAD_URL" -o "$archive_file" \
     || fatal "下载失败：${DOWNLOAD_URL}"
 
   unzip -q "$archive_file" -d "${TEMP_DIR}/release" || fatal "安装包解压失败。"
-  extracted_binary="$(find "${TEMP_DIR}/release" -type f -name "$BINARY_ASSET" -print -quit)"
+
+  extracted_binary="$(find "${TEMP_DIR}/release" -type f \( \
+    -iname "go-bot-linux-${RELEASE_ARCH}" \
+    -o -iname "go-bot-${RELEASE_ARCH}" \
+  \) -print -quit)"
   extracted_env_example="$(find "${TEMP_DIR}/release" -type f -name '.env.example' -print -quit)"
-  [[ -n "$extracted_binary" ]] || fatal "安装包中未找到可执行文件：${BINARY_ASSET}"
+
+  [[ -n "$extracted_binary" ]] || fatal "安装包中未找到 ${RELEASE_ARCH} 可执行文件（例如 go-bot-Linux-${RELEASE_ARCH}）。"
   [[ -n "$extracted_env_example" ]] || fatal "安装包中未找到 .env.example，无法生成带注释的配置文件。"
+
   DOWNLOADED_BINARY="$extracted_binary"
   DOWNLOADED_ENV_EXAMPLE="$extracted_env_example"
+  BINARY_ASSET="$(basename -- "$extracted_binary")"
+  INSTALLED_BINARY_PATH="${INSTALL_DIR}/${BINARY_ASSET}"
 }
 
 prepare_release() {
@@ -512,6 +605,7 @@ apply_update_migrations() {
 }
 
 install_binary() {
+  local stale_binary
   [[ -n "$INSTALLED_BINARY_PATH" ]] || fatal "尚未确定当前架构的二进制安装路径。"
   [[ ! -L "$INSTALLED_BINARY_PATH" ]] || fatal "程序文件不能是符号链接：${INSTALLED_BINARY_PATH}"
   install -m 0755 -o root -g root "$DOWNLOADED_BINARY" "$INSTALLED_BINARY_PATH"
@@ -521,6 +615,16 @@ install_binary() {
     rm -f -- "$LEGACY_BINARY_PATH"
     info "已清理旧版脚本重命名的二进制文件：${LEGACY_BINARY_PATH}"
   fi
+
+  while IFS= read -r stale_binary; do
+    [[ -n "$stale_binary" ]] || continue
+    [[ "$stale_binary" == "$INSTALLED_BINARY_PATH" ]] && continue
+    rm -f -- "$stale_binary"
+    info "已清理旧命名二进制文件：${stale_binary}"
+  done < <(find "$INSTALL_DIR" -maxdepth 1 -type f \( \
+    -iname "go-bot-linux-${RELEASE_ARCH}" \
+    -o -iname "go-bot-${RELEASE_ARCH}" \
+  \) ! -name "$BINARY_ASSET" -print 2>/dev/null)
 }
 
 write_version_file() {
@@ -596,10 +700,13 @@ installation_exists() {
 }
 
 installation_is_usable() {
+  refresh_binary_paths
   [[ -f "${INSTALL_DIR}/.env" ]] \
     && { [[ -x "$INSTALLED_BINARY_PATH" ]] || [[ -x "$LEGACY_BINARY_PATH" ]]; }
 }
+
 installation_needs_refresh() {
+  refresh_binary_paths
   [[ -x "$INSTALLED_BINARY_PATH" ]] || return 0
   [[ -f "$SYSTEMD_UNIT" ]] || return 0
   grep -Fqx "ExecStart=${INSTALLED_BINARY_PATH}" "$SYSTEMD_UNIT" || return 0
