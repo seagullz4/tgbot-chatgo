@@ -104,9 +104,8 @@ func (s *Services) EnsureTopic(ctx context.Context, b *bot.Bot, user *models.Use
 }
 
 func (s *Services) SendContactCard(ctx context.Context, b *bot.Bot, threadID int, user *models.User) error {
-	contactURL := directContactURL(user)
-	keyboard := AdminContactKeyboard(user.ID)
-	keyboard.InlineKeyboard[0][0].URL = contactURL
+	contactURL := DirectContactURL(user.ID, user.Username)
+	keyboard := adminContactKeyboard(user.ID, contactURL)
 
 	username := "未设置（使用用户 ID 联络）"
 	if user.Username != "" {
@@ -125,24 +124,37 @@ func (s *Services) SendContactCard(ctx context.Context, b *bot.Bot, threadID int
 	if err == nil && photos != nil && photos.TotalCount > 0 && len(photos.Photos) > 0 {
 		sizes := photos.Photos[0]
 		fileID := sizes[len(sizes)-1].FileID
-		_, err = b.SendPhoto(ctx, &bot.SendPhotoParams{
+		params := &bot.SendPhotoParams{
 			ChatID:          s.Cfg.Snapshot().AdminGroupID,
 			MessageThreadID: threadID,
 			Photo:           &models.InputFileString{Data: fileID},
 			Caption:         caption,
 			ParseMode:       models.ParseModeHTML,
 			ReplyMarkup:     keyboard,
-		})
+		}
+		_, err = b.SendPhoto(ctx, params)
+		if !IsDirectContactPrivacyRestricted(err) {
+			return err
+		}
+		params.Caption = WithDirectContactUnavailableNotice(caption)
+		params.ReplyMarkup = adminContactKeyboard(user.ID, "")
+		_, err = b.SendPhoto(ctx, params)
 		return err
 	}
 
-	_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+	params := &bot.SendMessageParams{
 		ChatID:          s.Cfg.Snapshot().AdminGroupID,
 		MessageThreadID: threadID,
 		Text:            caption,
 		ParseMode:       models.ParseModeHTML,
 		ReplyMarkup:     keyboard,
-	})
+	}
+	_, err = b.SendMessage(ctx, params)
+	if IsDirectContactPrivacyRestricted(err) {
+		params.Text = WithDirectContactUnavailableNotice(caption)
+		params.ReplyMarkup = adminContactKeyboard(user.ID, "")
+		_, err = b.SendMessage(ctx, params)
+	}
 	return err
 }
 
@@ -245,6 +257,14 @@ func (s *Services) UserConversationBlockMessage(user *model.User) (string, error
 func (s *Services) ForwardAdminToUser(ctx context.Context, b *bot.Bot, msg *models.Message) error {
 	if msg.MessageThreadID == 0 {
 		return nil // general chat messages ignored
+	}
+	if msg.From == nil || !s.Cfg.IsAdmin(msg.From.ID) {
+		userID := int64(0)
+		if msg.From != nil {
+			userID = msg.From.ID
+		}
+		s.Logger.Warn("blocked unauthorized admin-to-user forward", "user_id", userID, "thread_id", msg.MessageThreadID, "message_id", msg.ID)
+		return nil
 	}
 	// forum topic lifecycle events
 	if msg.ForumTopicCreated != nil {
@@ -448,6 +468,10 @@ func (s *Services) EditMirroredMessage(ctx context.Context, b *bot.Bot, msg *mod
 		if msg.Chat.ID != s.Cfg.Snapshot().AdminGroupID {
 			return nil
 		}
+		if msg.From == nil || !s.Cfg.IsAdmin(msg.From.ID) {
+			s.Logger.Warn("blocked unauthorized mirrored message edit", "chat_id", msg.Chat.ID, "message_id", msg.ID)
+			return nil
+		}
 		mapping, err = s.Store.GetByGroupMessageID(msg.ID)
 		if mapping != nil {
 			targetChatID = mapping.UserID
@@ -591,9 +615,10 @@ func displayName(u *models.User) string {
 	return name
 }
 
-func directContactURL(user *models.User) string {
-	if user.Username != "" {
-		return "https://t.me/" + user.Username
+func DirectContactURL(userID int64, username string) string {
+	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+	if username != "" {
+		return "https://t.me/" + username
 	}
-	return fmt.Sprintf("tg://user?id=%d", user.ID)
+	return fmt.Sprintf("tg://user?id=%d", userID)
 }

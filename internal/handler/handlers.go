@@ -60,9 +60,14 @@ func (h *Handlers) Register(b *bot.Bot, botUsername string) {
 // Default is used via bot.WithDefaultHandler for non-command messages (incl. media).
 func (h *Handlers) Default(ctx context.Context, b *bot.Bot, update *models.Update) {
 	if update.EditedMessage != nil {
-		h.logMessage("edited", update.ID, update.EditedMessage)
-		if err := h.Svc.EditMirroredMessage(ctx, b, update.EditedMessage); err != nil {
-			h.Logger.Error("edit mirrored message", "err", err, "chat_id", update.EditedMessage.Chat.ID, "message_id", update.EditedMessage.ID)
+		msg := update.EditedMessage
+		h.logMessage("edited", update.ID, msg)
+		if h.isAdminGroupMessage(msg) && !h.isConfiguredAdminMessage(msg) {
+			h.rejectUnauthorizedAdminMessage(ctx, b, msg)
+			return
+		}
+		if err := h.Svc.EditMirroredMessage(ctx, b, msg); err != nil {
+			h.Logger.Error("edit mirrored message", "err", err, "chat_id", msg.Chat.ID, "message_id", msg.ID)
 		}
 		return
 	}
@@ -92,6 +97,10 @@ func (h *Handlers) Default(ctx context.Context, b *bot.Bot, update *models.Updat
 		h.userToAdmin(ctx, b, msg)
 	case models.ChatTypeSupergroup, models.ChatTypeGroup:
 		if msg.Chat.ID == h.Svc.Cfg.Snapshot().AdminGroupID && (hasForwardableContent(msg) || isForumLifecycleEvent(msg)) {
+			if !h.isConfiguredAdminMessage(msg) {
+				h.rejectUnauthorizedAdminMessage(ctx, b, msg)
+				return
+			}
 			h.adminToUser(ctx, b, msg)
 		}
 	default:
@@ -233,6 +242,39 @@ func (h *Handlers) adminToUser(ctx context.Context, b *bot.Bot, msg *models.Mess
 	if err := h.Svc.ForwardAdminToUser(ctx, b, msg); err != nil {
 		h.Logger.Error("forward a2u", "err", err)
 	}
+}
+
+func (h *Handlers) isAdminGroupMessage(msg *models.Message) bool {
+	if msg == nil {
+		return false
+	}
+	return msg.Chat.ID == h.Svc.Cfg.Snapshot().AdminGroupID &&
+		(msg.Chat.Type == models.ChatTypeSupergroup || msg.Chat.Type == models.ChatTypeGroup)
+}
+
+func (h *Handlers) isConfiguredAdminMessage(msg *models.Message) bool {
+	return msg != nil && msg.From != nil && h.Svc.Cfg.IsAdmin(msg.From.ID)
+}
+
+func (h *Handlers) rejectUnauthorizedAdminMessage(ctx context.Context, b *bot.Bot, msg *models.Message) {
+	userID := int64(0)
+	if msg.From != nil {
+		userID = msg.From.ID
+	}
+	h.Logger.Warn("ignored unauthorized admin group message", "user_id", userID, "chat_id", msg.Chat.ID, "thread_id", msg.MessageThreadID, "message_id", msg.ID)
+	if !hasForwardableContent(msg) {
+		return
+	}
+	text := "⚠️ 你不是机器人配置的管理员，此消息未转达用户。"
+	if msg.From == nil {
+		text = "⚠️ 无法确认发送者身份（例如匿名管理员消息），此消息未转达用户。"
+	}
+	h.sendMessage(ctx, b, &bot.SendMessageParams{
+		ChatID:          msg.Chat.ID,
+		MessageThreadID: msg.MessageThreadID,
+		Text:            text,
+		ReplyParameters: &models.ReplyParameters{MessageID: msg.ID},
+	}, "reject unauthorized admin message")
 }
 
 func display(u *models.User) string {

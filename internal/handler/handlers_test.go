@@ -50,8 +50,9 @@ func TestMatchesCommand(t *testing.T) {
 }
 
 type handlerRecordingHTTPClient struct {
-	paths []string
-	texts []string
+	paths   []string
+	texts   []string
+	markups []string
 }
 
 func (client *handlerRecordingHTTPClient) Do(request *http.Request) (*http.Response, error) {
@@ -60,6 +61,7 @@ func (client *handlerRecordingHTTPClient) Do(request *http.Request) (*http.Respo
 	}
 	client.paths = append(client.paths, request.URL.Path)
 	client.texts = append(client.texts, request.FormValue("text"))
+	client.markups = append(client.markups, request.FormValue("reply_markup"))
 	result := "{\"message_id\":20,\"date\":0,\"chat\":{\"id\":123,\"type\":\"private\"}}"
 	if strings.HasSuffix(request.URL.Path, "/getChat") {
 		result = "{\"id\":-100,\"type\":\"supergroup\",\"title\":\"Admin Group\",\"is_forum\":true}"
@@ -270,5 +272,173 @@ func TestOwnerPrivateKeyboardUsesFunctionManagement(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("owner private keyboard missing function management")
+	}
+}
+
+func TestUserInfoContactKeyboard(t *testing.T) {
+	tests := []struct {
+		name      string
+		username  string
+		wantLabel string
+		wantURL   string
+	}{
+		{name: "username", username: "alice", wantLabel: "联系 @alice", wantURL: "https://t.me/alice"},
+		{name: "normalized username", username: " @alice ", wantLabel: "联系 @alice", wantURL: "https://t.me/alice"},
+		{name: "telegram id", wantLabel: "直接联系用户", wantURL: "tg://user?id=123"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			keyboard := userInfoContactKeyboard(123, test.username)
+			if keyboard == nil || len(keyboard.InlineKeyboard) != 1 || len(keyboard.InlineKeyboard[0]) != 1 {
+				t.Fatalf("unexpected keyboard: %+v", keyboard)
+			}
+			button := keyboard.InlineKeyboard[0][0]
+			if button.Text != test.wantLabel || button.URL != test.wantURL {
+				t.Fatalf("button = text %q url %q, want text %q url %q", button.Text, button.URL, test.wantLabel, test.wantURL)
+			}
+		})
+	}
+}
+
+type privacyRestrictedInfoHTTPClient struct {
+	texts   []string
+	markups []string
+}
+
+func (client *privacyRestrictedInfoHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	if err := request.ParseMultipartForm(1 << 20); err != nil {
+		return nil, err
+	}
+	text := request.FormValue("text")
+	markup := request.FormValue("reply_markup")
+	client.texts = append(client.texts, text)
+	client.markups = append(client.markups, markup)
+	body := `{"ok":true,"result":{"message_id":20,"date":0,"chat":{"id":-100,"type":"supergroup"}}}`
+	if strings.Contains(markup, "tg://user?id=123") {
+		body = `{"ok":false,"error_code":400,"description":"Bad Request: BUTTON_USER_PRIVACY_RESTRICTED"}`
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+func TestDefaultRejectsUnconfiguredAdminGroupSender(t *testing.T) {
+	messageStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "unauthorized-reply.sqlite3"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer messageStore.Close()
+	if _, err := messageStore.EnsureUser(&model.User{UserID: 123, FirstName: "User"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := messageStore.UpdateUserThreadID(123, 77); err != nil {
+		t.Fatal(err)
+	}
+
+	httpClient := &handlerRecordingHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	services := service.New(&config.Config{AdminGroupID: -100, AdminUserIDs: map[int64]struct{}{999: {}}}, messageStore, job.New(), logger)
+	handlers := New(services, logger)
+
+	handlers.Default(context.Background(), telegramBot, &models.Update{Message: &models.Message{
+		ID:              30,
+		Text:            "越权回复",
+		MessageThreadID: 77,
+		From:            &models.User{ID: 555},
+		Chat:            models.Chat{ID: -100, Type: models.ChatTypeSupergroup},
+	}})
+
+	for _, requestPath := range httpClient.paths {
+		if strings.HasSuffix(requestPath, "/copyMessage") {
+			t.Fatalf("unauthorized message was forwarded: paths=%q", httpClient.paths)
+		}
+	}
+	if joined := strings.Join(httpClient.texts, "\n"); !strings.Contains(joined, "未转达用户") {
+		t.Fatalf("unauthorized sender did not receive rejection: texts=%q", httpClient.texts)
+	}
+}
+
+func TestDefaultRejectsUnauthorizedAdminGroupEdit(t *testing.T) {
+	messageStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "unauthorized-edit.sqlite3"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer messageStore.Close()
+	if err := messageStore.SaveMessageMap(&model.MessageMap{UserChatMessageID: 10, GroupChatMessageID: 20, UserID: 123, MessageText: "原消息"}); err != nil {
+		t.Fatal(err)
+	}
+
+	httpClient := &handlerRecordingHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	services := service.New(&config.Config{AdminGroupID: -100, AdminUserIDs: map[int64]struct{}{999: {}}}, messageStore, job.New(), logger)
+	handlers := New(services, logger)
+
+	handlers.Default(context.Background(), telegramBot, &models.Update{EditedMessage: &models.Message{
+		ID:              20,
+		Text:            "被修改的越权消息",
+		MessageThreadID: 77,
+		From:            &models.User{ID: 555},
+		Chat:            models.Chat{ID: -100, Type: models.ChatTypeSupergroup},
+	}})
+
+	for _, requestPath := range httpClient.paths {
+		if strings.HasSuffix(requestPath, "/editMessageText") || strings.HasSuffix(requestPath, "/editMessageCaption") {
+			t.Fatalf("unauthorized edit was mirrored: paths=%q", httpClient.paths)
+		}
+	}
+}
+
+func TestInfoFallsBackWhenDirectContactIsPrivacyRestricted(t *testing.T) {
+	messageStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "privacy-info.sqlite3"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer messageStore.Close()
+	if _, err := messageStore.EnsureUser(&model.User{UserID: 123, FirstName: "Private User"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := messageStore.UpdateUserThreadID(123, 77); err != nil {
+		t.Fatal(err)
+	}
+
+	httpClient := &privacyRestrictedInfoHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	services := service.New(&config.Config{AdminGroupID: -100, AdminUserIDs: map[int64]struct{}{999: {}}, DisableVerification: true}, messageStore, job.New(), logger)
+	handlers := New(services, logger)
+
+	handlers.Info(context.Background(), telegramBot, &models.Update{Message: &models.Message{
+		ID:              31,
+		Text:            "/info",
+		MessageThreadID: 77,
+		From:            &models.User{ID: 999},
+		Chat:            models.Chat{ID: -100, Type: models.ChatTypeSupergroup},
+	}})
+
+	if len(httpClient.texts) != 2 {
+		t.Fatalf("send attempts = %d, texts=%q", len(httpClient.texts), httpClient.texts)
+	}
+	if httpClient.markups[0] == "" || httpClient.markups[1] != "" {
+		t.Fatalf("fallback markups = %q", httpClient.markups)
+	}
+	fallback := httpClient.texts[1]
+	for _, expected := range []string{"用户信息", "ID：<code>123</code>", "会话状态：已打开", "该用户无法直接联系"} {
+		if !strings.Contains(fallback, expected) {
+			t.Fatalf("fallback info missing %q: %q", expected, fallback)
+		}
 	}
 }

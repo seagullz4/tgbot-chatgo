@@ -27,12 +27,13 @@ func TestDirectContactURL(t *testing.T) {
 		want string
 	}{
 		{name: "username", user: &models.User{ID: 42, Username: "support_user"}, want: "https://t.me/support_user"},
+		{name: "normalized username", user: &models.User{ID: 42, Username: " @support_user "}, want: "https://t.me/support_user"},
 		{name: "telegram id", user: &models.User{ID: 42}, want: "tg://user?id=42"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := directContactURL(test.user); got != test.want {
-				t.Fatalf("directContactURL() = %q, want %q", got, test.want)
+			if got := DirectContactURL(test.user.ID, test.user.Username); got != test.want {
+				t.Fatalf("DirectContactURL() = %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -189,11 +190,12 @@ func TestForwardAdminToUserExplainsDeletedReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	services := New(&config.Config{AdminGroupID: -100}, messageStore, job.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	services := New(&config.Config{AdminGroupID: -100, AdminUserIDs: map[int64]struct{}{999: {}}}, messageStore, job.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	err = services.ForwardAdminToUser(context.Background(), telegramBot, &models.Message{
 		ID:              30,
 		Text:            "reply",
 		MessageThreadID: 55,
+		From:            &models.User{ID: 999},
 		Chat:            models.Chat{ID: -100, Type: models.ChatTypeSupergroup},
 		ReplyToMessage:  &models.Message{ID: 20},
 	})
@@ -202,5 +204,138 @@ func TestForwardAdminToUserExplainsDeletedReply(t *testing.T) {
 	}
 	if httpClient.noticeText != "当前回复引用的信息被对方删除" {
 		t.Fatalf("notice = %q", httpClient.noticeText)
+	}
+}
+
+type privacyRestrictedContactHTTPClient struct {
+	texts   []string
+	markups []string
+}
+
+func (client *privacyRestrictedContactHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	if err := request.ParseMultipartForm(1 << 20); err != nil {
+		return nil, err
+	}
+	if strings.HasSuffix(request.URL.Path, "/getUserProfilePhotos") {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true,"result":{"total_count":0,"photos":[]}}`)),
+		}, nil
+	}
+	text := request.FormValue("text")
+	markup := request.FormValue("reply_markup")
+	client.texts = append(client.texts, text)
+	client.markups = append(client.markups, markup)
+	body := `{"ok":true,"result":{"message_id":20,"date":0,"chat":{"id":-100,"type":"supergroup"}}}`
+	if strings.Contains(markup, "tg://user?id=123") {
+		body = `{"ok":false,"error_code":400,"description":"Bad Request: BUTTON_USER_PRIVACY_RESTRICTED"}`
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}, nil
+}
+
+func TestSendContactCardFallsBackForPrivacyRestrictedUser(t *testing.T) {
+	httpClient := &privacyRestrictedContactHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	services := New(&config.Config{AdminGroupID: -100}, nil, job.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := services.SendContactCard(context.Background(), telegramBot, 77, &models.User{ID: 123, FirstName: "Private User"}); err != nil {
+		t.Fatalf("send contact card fallback: %v", err)
+	}
+	if len(httpClient.texts) != 2 {
+		t.Fatalf("send attempts = %d, texts=%q", len(httpClient.texts), httpClient.texts)
+	}
+	if !strings.Contains(httpClient.texts[1], "该用户无法直接联系") {
+		t.Fatalf("fallback notice missing: %q", httpClient.texts[1])
+	}
+	if strings.Contains(httpClient.markups[1], "tg://user?id=123") {
+		t.Fatalf("fallback still contains restricted contact button: %q", httpClient.markups[1])
+	}
+	if !strings.Contains(httpClient.markups[1], "adm:info:123") || !strings.Contains(httpClient.markups[1], "adm:close:123") {
+		t.Fatalf("fallback lost admin actions: %q", httpClient.markups[1])
+	}
+}
+
+func TestForwardAdminToUserRejectsUnconfiguredSender(t *testing.T) {
+	messageStore, err := storesqlite.Open(filepath.Join(t.TempDir(), "unauthorized-forward.sqlite3"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer messageStore.Close()
+	if _, err := messageStore.EnsureUser(&model.User{UserID: 123}); err != nil {
+		t.Fatal(err)
+	}
+	if err := messageStore.UpdateUserThreadID(123, 55); err != nil {
+		t.Fatal(err)
+	}
+
+	httpClient := &recordingHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	services := New(&config.Config{AdminGroupID: -100, AdminUserIDs: map[int64]struct{}{999: {}}}, messageStore, job.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := services.ForwardAdminToUser(context.Background(), telegramBot, &models.Message{
+		ID:              30,
+		Text:            "unauthorized",
+		MessageThreadID: 55,
+		From:            &models.User{ID: 555},
+		Chat:            models.Chat{ID: -100, Type: models.ChatTypeSupergroup},
+	}); err != nil {
+		t.Fatalf("reject unauthorized forward: %v", err)
+	}
+	if httpClient.path != "" {
+		t.Fatalf("unauthorized service call reached Telegram API: %q", httpClient.path)
+	}
+}
+
+type privacyRestrictedPhotoContactHTTPClient struct {
+	captions []string
+	markups  []string
+}
+
+func (client *privacyRestrictedPhotoContactHTTPClient) Do(request *http.Request) (*http.Response, error) {
+	if err := request.ParseMultipartForm(1 << 20); err != nil {
+		return nil, err
+	}
+	if strings.HasSuffix(request.URL.Path, "/getUserProfilePhotos") {
+		body := `{"ok":true,"result":{"total_count":1,"photos":[[{"file_id":"small","file_unique_id":"small-id","width":80,"height":80},{"file_id":"large","file_unique_id":"large-id","width":320,"height":320}]]}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	}
+	caption := request.FormValue("caption")
+	markup := request.FormValue("reply_markup")
+	client.captions = append(client.captions, caption)
+	client.markups = append(client.markups, markup)
+	body := `{"ok":true,"result":{"message_id":20,"date":0,"chat":{"id":-100,"type":"supergroup"}}}`
+	if strings.Contains(markup, "tg://user?id=123") {
+		body = `{"ok":false,"error_code":400,"description":"Bad Request: BUTTON_USER_PRIVACY_RESTRICTED"}`
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+func TestSendPhotoContactCardFallsBackForPrivacyRestrictedUser(t *testing.T) {
+	httpClient := &privacyRestrictedPhotoContactHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, httpClient))
+	if err != nil {
+		t.Fatal(err)
+	}
+	services := New(&config.Config{AdminGroupID: -100}, nil, job.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := services.SendContactCard(context.Background(), telegramBot, 77, &models.User{ID: 123, FirstName: "Private User"}); err != nil {
+		t.Fatalf("send photo contact fallback: %v", err)
+	}
+	if len(httpClient.captions) != 2 {
+		t.Fatalf("photo send attempts = %d, captions=%q", len(httpClient.captions), httpClient.captions)
+	}
+	if !strings.Contains(httpClient.captions[1], "该用户无法直接联系") {
+		t.Fatalf("photo fallback notice missing: %q", httpClient.captions[1])
+	}
+	if strings.Contains(httpClient.markups[1], "tg://user?id=123") || !strings.Contains(httpClient.markups[1], "adm:info:123") {
+		t.Fatalf("photo fallback keyboard = %q", httpClient.markups[1])
 	}
 }

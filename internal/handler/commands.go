@@ -89,7 +89,47 @@ func (h *Handlers) Info(ctx context.Context, b *bot.Bot, update *models.Update) 
 		h.adminReply(ctx, b, message, "查询失败："+err.Error())
 		return
 	}
-	h.sendMessage(ctx, b, &bot.SendMessageParams{ChatID: message.Chat.ID, MessageThreadID: message.MessageThreadID, Text: info, ParseMode: models.ParseModeHTML}, "send info")
+	username := ""
+	if user, lookupErr := h.Svc.Store.GetUserByTelegramID(userID); lookupErr != nil {
+		h.adminReply(ctx, b, message, "查询联系信息失败："+lookupErr.Error())
+		return
+	} else if user != nil {
+		username = user.Username
+	}
+	h.sendUserInfo(ctx, b, message, info, userID, username)
+}
+
+func (h *Handlers) sendUserInfo(ctx context.Context, b *bot.Bot, message *models.Message, info string, userID int64, username string) {
+	params := &bot.SendMessageParams{
+		ChatID:          message.Chat.ID,
+		MessageThreadID: message.MessageThreadID,
+		Text:            info,
+		ParseMode:       models.ParseModeHTML,
+		ReplyMarkup:     userInfoContactKeyboard(userID, username),
+	}
+	if _, err := b.SendMessage(ctx, params); err != nil {
+		if !service.IsDirectContactPrivacyRestricted(err) {
+			h.Logger.Error("send info", "err", err, "chat_id", params.ChatID)
+			return
+		}
+		params.Text = service.WithDirectContactUnavailableNotice(info)
+		params.ReplyMarkup = nil
+		if _, retryErr := b.SendMessage(ctx, params); retryErr != nil {
+			h.Logger.Error("send info without direct contact", "err", retryErr, "chat_id", params.ChatID)
+		}
+	}
+}
+
+func userInfoContactKeyboard(userID int64, username string) *models.InlineKeyboardMarkup {
+	username = strings.TrimPrefix(strings.TrimSpace(username), "@")
+	label := "直接联系用户"
+	if username != "" {
+		label = "联系 @" + username
+	}
+	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{{{
+		Text: label,
+		URL:  service.DirectContactURL(userID, username),
+	}}}}
 }
 
 func (h *Handlers) Close(ctx context.Context, b *bot.Bot, update *models.Update) {

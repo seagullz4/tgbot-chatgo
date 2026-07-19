@@ -52,14 +52,22 @@ func OwnerKeyboard() *models.ReplyKeyboardMarkup {
 }
 
 func AdminContactKeyboard(userID int64) *models.InlineKeyboardMarkup {
-	return &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
-		{{Text: "👤 直接联络", URL: fmt.Sprintf("tg://user?id=%d", userID)}},
-		{
+	return adminContactKeyboard(userID, fmt.Sprintf("tg://user?id=%d", userID))
+}
+
+func adminContactKeyboard(userID int64, directContactURL string) *models.InlineKeyboardMarkup {
+	rows := make([][]models.InlineKeyboardButton, 0, 3)
+	if directContactURL != "" {
+		rows = append(rows, []models.InlineKeyboardButton{{Text: "👤 直接联络", URL: directContactURL}})
+	}
+	rows = append(rows,
+		[]models.InlineKeyboardButton{
 			{Text: "ℹ️ 用户信息", CallbackData: fmt.Sprintf("adm:info:%d", userID)},
 			{Text: "⏸ 关闭会话", CallbackData: fmt.Sprintf("adm:close:%d", userID)},
 		},
-		{{Text: "🚫 封禁用户", CallbackData: fmt.Sprintf("adm:ban:%d", userID)}},
-	}}
+		[]models.InlineKeyboardButton{{Text: "🚫 封禁用户", CallbackData: fmt.Sprintf("adm:ban:%d", userID)}},
+	)
+	return &models.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 func UserCommandMenu() []models.BotCommand {
