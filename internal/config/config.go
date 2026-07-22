@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,24 +24,25 @@ type Provider interface {
 
 // Config contains runtime settings.
 type Config struct {
-	BotToken                 string
-	AppName                  string
-	WelcomeMessage           string
-	AdminGroupID             int64
-	AdminUserIDs             map[int64]struct{}
-	OwnerUserIDs             map[int64]struct{}
-	DeleteTopicAsForeverBan  bool
-	DeleteUserMessageOnClear bool
-	DisableVerification      bool
-	UserForwardAck           bool
-	MessageInterval          int
-	DatabasePath             string
-	Workers                  int
-	PollTimeoutSeconds       int
-	HTTPMaxIdlePerHost       int
-	LogPath                  string
-	LogMaxSizeMB             int
-	LogMaxBackups            int
+	BotToken                    string
+	AppName                     string
+	WelcomeMessage              string
+	AdminGroupID                int64
+	AdminUserIDs                map[int64]struct{}
+	OwnerUserIDs                map[int64]struct{}
+	DeleteTopicAsForeverBan     bool
+	DeleteUserMessageOnClear    bool
+	DisableVerification         bool
+	UserForwardAck              bool
+	MessageInterval             int
+	StatusNotifyIntervalMinutes int
+	DatabasePath                string
+	Workers                     int
+	PollTimeoutSeconds          int
+	HTTPMaxIdlePerHost          int
+	LogPath                     string
+	LogMaxSizeMB                int
+	LogMaxBackups               int
 }
 
 func (c *Config) Current() Config { return cloneConfig(*c) }
@@ -267,6 +269,15 @@ func configFromValues(values map[string]string) (Config, error) {
 	if cfg.MessageInterval < 0 {
 		return Config{}, fmt.Errorf("MESSAGE_INTERVAL must be zero or greater, got %d", cfg.MessageInterval)
 	}
+	if cfg.StatusNotifyIntervalMinutes, err = parseIntSetting("STATUS_NOTIFY_INTERVAL_MINUTES", value("STATUS_NOTIFY_INTERVAL_MINUTES", "30")); err != nil {
+		return Config{}, err
+	}
+	if cfg.StatusNotifyIntervalMinutes < 0 {
+		return Config{}, fmt.Errorf("STATUS_NOTIFY_INTERVAL_MINUTES must be zero or greater, got %d", cfg.StatusNotifyIntervalMinutes)
+	}
+	if cfg.StatusNotifyIntervalMinutes > 10080 {
+		return Config{}, fmt.Errorf("STATUS_NOTIFY_INTERVAL_MINUTES must be at most 10080 (7 days), got %d", cfg.StatusNotifyIntervalMinutes)
+	}
 	if cfg.Workers, err = parseIntSetting("BOT_WORKERS", value("BOT_WORKERS", "4")); err != nil {
 		return Config{}, err
 	}
@@ -372,6 +383,7 @@ func Values(cfg Config) map[string]string {
 		"DISABLE_VERIFICATION":             strconv.FormatBool(cfg.DisableVerification),
 		"USER_FORWARD_ACK":                 strconv.FormatBool(cfg.UserForwardAck),
 		"MESSAGE_INTERVAL":                 strconv.Itoa(cfg.MessageInterval),
+		"STATUS_NOTIFY_INTERVAL_MINUTES":   strconv.Itoa(cfg.StatusNotifyIntervalMinutes),
 		"DATABASE_PATH":                    cfg.DatabasePath,
 		"BOT_WORKERS":                      strconv.Itoa(cfg.Workers),
 		"POLL_TIMEOUT_SECONDS":             strconv.Itoa(cfg.PollTimeoutSeconds),
@@ -416,6 +428,45 @@ func clamp(value, minimum, maximum int) int {
 		return maximum
 	}
 	return value
+}
+
+// FormatStatusNotifyInterval renders a human-readable status-notify interval.
+func FormatStatusNotifyInterval(minutes int) string {
+	if minutes <= 0 {
+		return "已关闭"
+	}
+	if minutes%60 == 0 {
+		hours := minutes / 60
+		if hours == 1 {
+			return "每 1 小时"
+		}
+		return fmt.Sprintf("每 %d 小时", hours)
+	}
+	if minutes < 60 {
+		return fmt.Sprintf("每 %d 分钟", minutes)
+	}
+	hours := float64(minutes) / 60
+	return fmt.Sprintf("每 %.1f 小时（%d 分钟）", hours, minutes)
+}
+
+// StatusNotifyHoursToMinutes converts hour input from the ops panel into minutes.
+func StatusNotifyHoursToMinutes(raw string) (int, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, fmt.Errorf("STATUS_NOTIFY_INTERVAL_MINUTES interval is required")
+	}
+	hours, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("STATUS_NOTIFY_INTERVAL_MINUTES must be a number of hours, got %q", raw)
+	}
+	if hours < 0 {
+		return 0, fmt.Errorf("STATUS_NOTIFY_INTERVAL_MINUTES must be zero or greater, got %v", hours)
+	}
+	minutes := int(math.Round(hours * 60))
+	if minutes > 10080 {
+		return 0, fmt.Errorf("STATUS_NOTIFY_INTERVAL_MINUTES must be at most 10080 (7 days), got %d", minutes)
+	}
+	return minutes, nil
 }
 
 func readDotEnv(path string) (map[string]string, []byte, error) {

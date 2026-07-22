@@ -220,3 +220,99 @@ func TestAdminPageBounds(t *testing.T) {
 		t.Fatalf("bounds = page:%d start:%d end:%d pages:%d", page, start, end, pages)
 	}
 }
+
+func TestSetStatusNotifyUpdatesEnv(t *testing.T) {
+	client := &functionHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgManager := newTestConfigManager(t)
+	manager := New(cfgManager, nil, nil)
+	controller := &applyingController{cfg: cfgManager}
+	manager.SetController(controller)
+
+	manager.pending[10] = pending{action: "setstatusnotify", expires: time.Now().Add(time.Minute)}
+	manager.PendingInput(context.Background(), telegramBot, &models.Update{Message: &models.Message{
+		From: &models.User{ID: 10},
+		Chat: models.Chat{ID: 10, Type: models.ChatTypePrivate},
+		Text: "0.5",
+	}})
+
+	if cfgManager.Current().StatusNotifyIntervalMinutes != 30 {
+		t.Fatalf("interval minutes = %d, want 30", cfgManager.Current().StatusNotifyIntervalMinutes)
+	}
+	joined := strings.Join(client.texts, "\n")
+	if !strings.Contains(joined, "状态通知已更新为：每 30 分钟") {
+		t.Fatalf("success text missing: %q", client.texts)
+	}
+	if !strings.Contains(joined, "状态通知：每 30 分钟") {
+		t.Fatalf("panel missing updated interval: %q", client.texts)
+	}
+	if !strings.Contains(strings.Join(client.markups, "\n"), "fn:setstatusnotify") {
+		t.Fatalf("panel missing status notify button: %q", client.markups)
+	}
+}
+
+func TestFunctionPanelShowsStatusNotify(t *testing.T) {
+	client := &functionHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := New(newTestConfigManager(t), nil, nil)
+	manager.Callback(context.Background(), telegramBot, privateOwnerCallback("panel", "fn:home"))
+	if len(client.texts) == 0 || !strings.Contains(client.texts[len(client.texts)-1], "状态通知：") {
+		t.Fatalf("panel text = %q", client.texts)
+	}
+	if !strings.Contains(client.markups[len(client.markups)-1], "fn:setstatusnotify") {
+		t.Fatalf("panel markup = %q", client.markups)
+	}
+}
+
+func TestSetStatusNotifyRejectsInvalidHours(t *testing.T) {
+	client := &functionHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgManager := newTestConfigManager(t)
+	manager := New(cfgManager, nil, nil)
+	manager.SetController(&applyingController{cfg: cfgManager})
+	before := cfgManager.Current().StatusNotifyIntervalMinutes
+	manager.pending[10] = pending{action: "setstatusnotify", expires: time.Now().Add(time.Minute)}
+	manager.PendingInput(context.Background(), telegramBot, &models.Update{Message: &models.Message{
+		From: &models.User{ID: 10},
+		Chat: models.Chat{ID: 10, Type: models.ChatTypePrivate},
+		Text: "abc",
+	}})
+	if cfgManager.Current().StatusNotifyIntervalMinutes != before {
+		t.Fatal("invalid input changed status notify interval")
+	}
+	if !strings.Contains(strings.Join(client.texts, "\n"), "间隔格式错误") {
+		t.Fatalf("rejection text = %q", client.texts)
+	}
+}
+
+func TestSetStatusNotifyCanDisable(t *testing.T) {
+	client := &functionHTTPClient{}
+	telegramBot, err := bot.New("123456:test-token", bot.WithSkipGetMe(), bot.WithHTTPClient(time.Second, client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgManager := newTestConfigManager(t)
+	manager := New(cfgManager, nil, nil)
+	manager.SetController(&applyingController{cfg: cfgManager})
+	manager.pending[10] = pending{action: "setstatusnotify", expires: time.Now().Add(time.Minute)}
+	manager.PendingInput(context.Background(), telegramBot, &models.Update{Message: &models.Message{
+		From: &models.User{ID: 10},
+		Chat: models.Chat{ID: 10, Type: models.ChatTypePrivate},
+		Text: "0",
+	}})
+	if cfgManager.Current().StatusNotifyIntervalMinutes != 0 {
+		t.Fatalf("interval = %d, want 0", cfgManager.Current().StatusNotifyIntervalMinutes)
+	}
+	if !strings.Contains(strings.Join(client.texts, "\n"), "状态通知已更新为：已关闭") {
+		t.Fatalf("disable text = %q", client.texts)
+	}
+}

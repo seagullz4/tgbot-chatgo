@@ -50,3 +50,9 @@ func TestRollbackSessionConfigKeepsValidatedGroupForWorkerRestart(t *testing.T) 
 		t.Fatal("worker-only rollback unexpectedly rewrote ADMIN_GROUP_ID")
 	}
 }
+
+func TestFormatStatusNotifyIntervalViaConfig(t *testing.T) {
+	if got := config.FormatStatusNotifyInterval(90); got != "每 1.5 小时（90 分钟）" {
+		t.Fatalf("got %q", got)
+	}
+}

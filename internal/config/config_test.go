@@ -147,3 +147,63 @@ func TestLoadSeparatesOwnerFromOrdinaryAdmins(t *testing.T) {
 		t.Fatal("owner remained duplicated in ordinary admins")
 	}
 }
+
+func TestLoadStatusNotifyDefault(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("STATUS_NOTIFY_INTERVAL_MINUTES", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StatusNotifyIntervalMinutes != 30 {
+		t.Fatalf("StatusNotifyIntervalMinutes = %d, want 30", cfg.StatusNotifyIntervalMinutes)
+	}
+}
+
+func TestLoadStatusNotifyDisableAndReject(t *testing.T) {
+	setRequiredEnvironment(t)
+	t.Setenv("STATUS_NOTIFY_INTERVAL_MINUTES", "0")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.StatusNotifyIntervalMinutes != 0 {
+		t.Fatalf("StatusNotifyIntervalMinutes = %d, want 0", cfg.StatusNotifyIntervalMinutes)
+	}
+
+	t.Setenv("STATUS_NOTIFY_INTERVAL_MINUTES", "-1")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "STATUS_NOTIFY_INTERVAL_MINUTES") {
+		t.Fatalf("expected negative interval error, got %v", err)
+	}
+	t.Setenv("STATUS_NOTIFY_INTERVAL_MINUTES", "10081")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "STATUS_NOTIFY_INTERVAL_MINUTES") {
+		t.Fatalf("expected upper bound error, got %v", err)
+	}
+}
+
+func TestStatusNotifyHoursToMinutes(t *testing.T) {
+	minutes, err := StatusNotifyHoursToMinutes("0.5")
+	if err != nil || minutes != 30 {
+		t.Fatalf("0.5 hours -> %d, err=%v", minutes, err)
+	}
+	minutes, err = StatusNotifyHoursToMinutes("1")
+	if err != nil || minutes != 60 {
+		t.Fatalf("1 hour -> %d, err=%v", minutes, err)
+	}
+	minutes, err = StatusNotifyHoursToMinutes("0")
+	if err != nil || minutes != 0 {
+		t.Fatalf("0 hours -> %d, err=%v", minutes, err)
+	}
+	if _, err := StatusNotifyHoursToMinutes("-1"); err == nil {
+		t.Fatal("expected negative hours error")
+	}
+	if FormatStatusNotifyInterval(30) != "每 30 分钟" {
+		t.Fatalf("format 30 = %q", FormatStatusNotifyInterval(30))
+	}
+	if FormatStatusNotifyInterval(60) != "每 1 小时" {
+		t.Fatalf("format 60 = %q", FormatStatusNotifyInterval(60))
+	}
+	if FormatStatusNotifyInterval(0) != "已关闭" {
+		t.Fatalf("format 0 = %q", FormatStatusNotifyInterval(0))
+	}
+}

@@ -114,12 +114,12 @@ func (m *Manager) sendPanel(ctx context.Context, b *bot.Bot, chatID int64) {
 	if len(runes) > 60 {
 		welcome = string(runes[:60]) + "…"
 	}
-	text := fmt.Sprintf("<b>机器人运维设置</b>\n\nBot：@%s (<code>%d</code>)\n管理群：%s (<code>%d</code>)\n普通管理员：%d\n超级管理员：1\nToken：***%s\n欢迎语：%s", escape(info.Username), info.ID, escape(info.GroupTitle), cfg.AdminGroupID, len(cfg.AdminUserIDs), tokenTail(cfg.BotToken), escape(welcome))
+	text := fmt.Sprintf("<b>机器人运维设置</b>\n\nBot：@%s (<code>%d</code>)\n管理群：%s (<code>%d</code>)\n普通管理员：%d\n超级管理员：1\nToken：***%s\n欢迎语：%s\n状态通知：%s", escape(info.Username), info.ID, escape(info.GroupTitle), cfg.AdminGroupID, len(cfg.AdminUserIDs), tokenTail(cfg.BotToken), escape(welcome), escape(config.FormatStatusNotifyInterval(cfg.StatusNotifyIntervalMinutes)))
 	keyboard := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
 		{{Text: "切换管理群", CallbackData: "fn:setgroup"}, {Text: "修改欢迎语", CallbackData: "fn:setwelcome"}},
 		{{Text: "添加管理员", CallbackData: "fn:addadmin"}, {Text: "查询管理员", CallbackData: "fn:admins:0"}},
 		{{Text: "删除管理员", CallbackData: "fn:deladmins:0"}, {Text: "切换 Token", CallbackData: "fn:settoken"}},
-		{{Text: "重新加载配置", CallbackData: "fn:reload"}},
+		{{Text: "定时状态通知", CallbackData: "fn:setstatusnotify"}, {Text: "重新加载配置", CallbackData: "fn:reload"}},
 		{{Text: "下载日志", CallbackData: "fn:logs"}, {Text: "清除日志", CallbackData: "fn:clearlogs"}},
 	}}
 	_, _ = b.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: text, ParseMode: models.ParseModeHTML, ReplyMarkup: keyboard})
@@ -139,7 +139,7 @@ func (m *Manager) Callback(ctx context.Context, b *bot.Bot, update *models.Updat
 		return
 	}
 	switch data {
-	case "setgroup", "setwelcome", "addadmin", "settoken":
+	case "setgroup", "setwelcome", "addadmin", "settoken", "setstatusnotify":
 		m.begin(ctx, b, q.From.ID, data)
 	case "reload":
 		m.reload(ctx, b, q.From.ID)
@@ -160,7 +160,7 @@ func (m *Manager) Callback(ctx context.Context, b *bot.Bot, update *models.Updat
 	}
 }
 func (m *Manager) begin(ctx context.Context, b *bot.Bot, userID int64, action string) {
-	prompts := map[string]string{"setgroup": "请输入新的管理超级群 ID（-100...）", "setwelcome": "请输入新的欢迎语，可包含换行", "addadmin": "请输入要添加的管理员用户 ID", "settoken": "请输入新的 Bot Token；消息处理后会尝试删除"}
+	prompts := map[string]string{"setgroup": "请输入新的管理超级群 ID（-100...）", "setwelcome": "请输入新的欢迎语，可包含换行", "addadmin": "请输入要添加的管理员用户 ID", "settoken": "请输入新的 Bot Token；消息处理后会尝试删除", "setstatusnotify": "请输入状态通知间隔（小时，支持小数，如 0.5=30 分钟，1=1 小时；0 表示关闭）"}
 	m.mu.Lock()
 	m.pending[userID] = pending{action: action, expires: time.Now().Add(5 * time.Minute)}
 	m.mu.Unlock()
@@ -216,12 +216,23 @@ func (m *Manager) PendingInput(ctx context.Context, b *bot.Bot, update *models.U
 		admins := cfg.AdminUserIDs
 		admins[id] = struct{}{}
 		updates["ADMIN_USER_IDS"] = config.FormatIDs(admins)
+	case "setstatusnotify":
+		minutes, err := config.StatusNotifyHoursToMinutes(value)
+		if err != nil {
+			m.reply(ctx, b, userID, "间隔格式错误：请输入小时数，例如 0.5、1、2；0 表示关闭")
+			return
+		}
+		updates["STATUS_NOTIFY_INTERVAL_MINUTES"] = strconv.Itoa(minutes)
 	}
 	if err := m.apply(ctx, updates, false); err != nil {
 		m.reply(ctx, b, userID, "修改失败："+err.Error())
 		return
 	}
-	m.reply(ctx, b, userID, "配置已更新并写入 .env")
+	success := "配置已更新并写入 .env"
+	if state.action == "setstatusnotify" {
+		success = "状态通知已更新为：" + config.FormatStatusNotifyInterval(m.cfg.Current().StatusNotifyIntervalMinutes)
+	}
+	m.reply(ctx, b, userID, success)
 	m.sendPanel(ctx, b, userID)
 }
 func (m *Manager) requestConfigConfirm(ctx context.Context, b *bot.Bot, userID int64, updates map[string]string, reset bool, text string) {

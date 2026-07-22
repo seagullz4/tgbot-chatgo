@@ -34,18 +34,20 @@ type botSession struct {
 }
 
 type Controller struct {
-	root      context.Context
-	cfg       *config.Manager
-	store     store.Store
-	jobs      *job.Scheduler
-	service   *service.Services
-	handlers  *handler.Handlers
-	functions *function.Manager
-	logger    *slog.Logger
-	mu        sync.Mutex
-	updateMu  sync.Mutex
-	menuMu    sync.Mutex
-	active    *botSession
+	root            context.Context
+	cfg             *config.Manager
+	store           store.Store
+	jobs            *job.Scheduler
+	service         *service.Services
+	handlers        *handler.Handlers
+	functions       *function.Manager
+	logger          *slog.Logger
+	mu              sync.Mutex
+	updateMu        sync.Mutex
+	menuMu          sync.Mutex
+	heartbeatMu     sync.Mutex
+	heartbeatCancel context.CancelFunc
+	active          *botSession
 }
 
 func NewController(root context.Context, cfg *config.Manager, st store.Store, jobs *job.Scheduler, svc *service.Services, handlers *handler.Handlers, functions *function.Manager, logger *slog.Logger) *Controller {
@@ -61,6 +63,7 @@ func (c *Controller) Start() error {
 	c.active = session
 	c.mu.Unlock()
 	c.start(session)
+	c.syncHeartbeat(c.cfg.Current())
 	return nil
 }
 func (c *Controller) Stop() {
@@ -68,6 +71,7 @@ func (c *Controller) Stop() {
 	defer c.updateMu.Unlock()
 	c.menuMu.Lock()
 	defer c.menuMu.Unlock()
+	c.stopHeartbeat()
 	c.mu.Lock()
 	session := c.active
 	c.active = nil
@@ -164,6 +168,7 @@ func (c *Controller) Reload(ctx context.Context) error {
 }
 
 func (c *Controller) afterApply(old, candidate config.Config) {
+	c.syncHeartbeat(candidate)
 	restart := old.BotToken != candidate.BotToken || old.Workers != candidate.Workers || old.PollTimeoutSeconds != candidate.PollTimeoutSeconds || old.HTTPMaxIdlePerHost != candidate.HTTPMaxIdlePerHost
 	if restart {
 		go func() {
@@ -183,6 +188,7 @@ func (c *Controller) afterApply(old, candidate config.Config) {
 				latest, updates := rollbackSessionConfig(latest, old, candidate)
 				if rollbackHash, rollbackErr := c.cfg.Write(updates); rollbackErr == nil {
 					c.cfg.Apply(latest, rollbackHash)
+					c.syncHeartbeat(latest)
 					c.NotifyOwners("Bot 会话切换失败，已恢复旧配置：" + err.Error())
 				}
 			}
@@ -333,14 +339,97 @@ func (c *Controller) refreshMenus(previous config.Config) {
 	c.service.RefreshCommandMenus(c.root, session.bot, previous, current)
 }
 func (c *Controller) NotifyOwners(text string) {
+	c.notifyUsers(c.cfg.Current().OwnerUserIDs, text)
+}
+
+func (c *Controller) NotifyAdmins(text string) {
 	cfg := c.cfg.Current()
+	recipients := make(map[int64]struct{}, len(cfg.OwnerUserIDs)+len(cfg.AdminUserIDs))
+	for id := range cfg.OwnerUserIDs {
+		recipients[id] = struct{}{}
+	}
+	for id := range cfg.AdminUserIDs {
+		recipients[id] = struct{}{}
+	}
+	c.notifyUsers(recipients, text)
+}
+
+func (c *Controller) notifyUsers(recipients map[int64]struct{}, text string) {
 	c.mu.Lock()
 	session := c.active
 	c.mu.Unlock()
 	if session == nil {
 		return
 	}
-	for owner := range cfg.OwnerUserIDs {
-		_, _ = session.bot.SendMessage(c.root, &bot.SendMessageParams{ChatID: owner, Text: text})
+	for userID := range recipients {
+		_, _ = session.bot.SendMessage(c.root, &bot.SendMessageParams{ChatID: userID, Text: text})
 	}
+}
+
+func (c *Controller) stopHeartbeat() {
+	c.heartbeatMu.Lock()
+	defer c.heartbeatMu.Unlock()
+	if c.heartbeatCancel != nil {
+		c.heartbeatCancel()
+		c.heartbeatCancel = nil
+	}
+}
+
+func (c *Controller) syncHeartbeat(cfg config.Config) {
+	c.heartbeatMu.Lock()
+	defer c.heartbeatMu.Unlock()
+	if c.heartbeatCancel != nil {
+		c.heartbeatCancel()
+		c.heartbeatCancel = nil
+	}
+	if cfg.StatusNotifyIntervalMinutes <= 0 {
+		c.logger.Info("status notify disabled")
+		return
+	}
+	ctx, cancel := context.WithCancel(c.root)
+	c.heartbeatCancel = cancel
+	interval := time.Duration(cfg.StatusNotifyIntervalMinutes) * time.Minute
+	c.logger.Info("status notify scheduled", "interval_minutes", cfg.StatusNotifyIntervalMinutes)
+	go c.runHeartbeat(ctx, interval)
+}
+
+func (c *Controller) runHeartbeat(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.sendStatusOK()
+		}
+	}
+}
+
+func (c *Controller) sendStatusOK() {
+	cfg := c.cfg.Current()
+	if cfg.StatusNotifyIntervalMinutes <= 0 {
+		return
+	}
+	c.mu.Lock()
+	session := c.active
+	c.mu.Unlock()
+	if session == nil {
+		return
+	}
+	username := session.me.Username
+	if username == "" {
+		username = "unknown"
+	}
+	text := fmt.Sprintf(
+		"✅ 机器人状态正常\n时间：%s\nBot：@%s（%d）\n管理群：%s（%d）\n通知间隔：%s",
+		time.Now().Format("2006-01-02 15:04:05"),
+		username,
+		session.me.ID,
+		session.groupTitle,
+		cfg.AdminGroupID,
+		config.FormatStatusNotifyInterval(cfg.StatusNotifyIntervalMinutes),
+	)
+	c.NotifyAdmins(text)
+	c.logger.Info("status notify sent", "interval_minutes", cfg.StatusNotifyIntervalMinutes)
 }
